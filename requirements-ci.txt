@@ -1,0 +1,6 @@
+# Extra deps ONLY the GitHub Actions runner needs (to execute the FII/DII notebook
+# headless). Kept out of requirements.txt so the Streamlit Cloud app stays lean.
+scipy
+jupyter
+nbconvert
+ipykernel
