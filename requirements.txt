@@ -11,3 +11,4 @@ beautifulsoup4
 lxml
 openpyxl
 Authlib>=1.3.2         # required by Streamlit native OIDC auth
+httpx>=0.27            # Authlib's OAuth client imports httpx — needed for st.login() (else: ModuleNotFoundError: httpx)
