@@ -1,32 +1,25 @@
 """
-auth.py — access control for the dashboard.
+auth.py — simple password gate for the dashboard.
 
-Google sign-in (Streamlit native st.login / OIDC) + an email allow-list +
-a session timeout. Call auth.require_login() once, right after st.set_page_config.
+Replaces Google OAuth (st.login), which kept looping on Streamlit Community
+Cloud ("Missing provider for OAuth callback"). Instead the app asks for a
+single shared password that you give to the people you want to let in.
 
-Allow-list: hard-coded below for now (easy to read/edit). To switch to a
-Google-Sheet-driven list later, replace ALLOWED_EMAILS / is_allowed() with a
-sheet read — nothing else changes.
+Password source (priority order):
+  1. st.secrets["app"]["password"]   (Streamlit Cloud Secrets + local secrets.toml)
+  2. env var  APP_PASSWORD
 
 Local testing: setting  [app] dev_no_auth = true  in .streamlit/secrets.toml
-bypasses Google sign-in so you can run the dashboard locally WITHOUT setting up
-an OAuth client. It is OFF by default and must never be set in production.
+bypasses the gate entirely. It is OFF by default and is HARD-disabled on
+Streamlit Cloud (apps run under /mount/...), so a stray secret can never open
+the deployed app.
+
+Call auth.require_login() once, right after st.set_page_config.
 """
+import hmac
 import os
 import time
 import streamlit as st
-
-# ── ALLOW-LIST ───────────────────────────────────────────────────────────────
-# Only these Google accounts may use the app. Edit here for now; move to a Sheet later.
-ALLOWED_EMAILS = {
-    "shuvendu.pritam@wakefit.co",
-    "shuvendupritamdas@gmail.com",
-    "shuvendupritamdas181@gmail.com",
-}
-
-
-def is_allowed(email: str) -> bool:
-    return (email or "").strip().lower() in {e.lower() for e in ALLOWED_EMAILS}
 
 
 # ── small helpers ────────────────────────────────────────────────────────────
@@ -35,6 +28,14 @@ def _app_cfg(key, default):
         return st.secrets.get("app", {}).get(key, default)
     except Exception:
         return default
+
+
+def _expected_password():
+    """The password the user must type, from secrets or env. None if unset."""
+    pw = _app_cfg("password", None)
+    if not pw:
+        pw = os.environ.get("APP_PASSWORD")
+    return str(pw) if pw else None
 
 
 def _dev_bypass() -> bool:
@@ -55,71 +56,52 @@ def _timeout_seconds() -> int:
 
 def _login_screen():
     st.title("🔒 SPritamDas Stock Dashboard")
-    st.subheader("This is a private app — please sign in.")
-    st.write("Access is limited to approved Google accounts.")
-    st.button("Sign in with Google", type="primary", on_click=st.login)
-    st.caption("If you should have access but can't get in, ask the owner to add your email.")
-
-
-def _deny_screen(email: str):
-    st.title("🚫 Access not authorized")
-    st.write(f"**{email}** is not on the allow-list for this app.")
-    st.write("Ask the owner to add your email, then sign in again.")
-    st.button("Log out", on_click=st.logout)
+    st.subheader("This is a private app — please enter the password.")
+    expected = _expected_password()
+    with st.form("spd_login_form", clear_on_submit=False):
+        pw = st.text_input("Password", type="password",
+                           placeholder="Enter the access password")
+        submitted = st.form_submit_button("Enter", type="primary")
+    if submitted:
+        if not expected:
+            st.error("No password is configured. Add  [app] password = \"…\"  to the app's secrets.")
+        elif hmac.compare_digest(pw, expected):     # constant-time compare
+            st.session_state["_authed"] = True
+            st.session_state["_authed_at"] = time.time()
+            st.rerun()
+        else:
+            st.error("Incorrect password. Try again, or ask the owner for the password.")
+    st.caption("Access is limited to people who have the password.")
 
 
 def require_login() -> str:
-    """Gate the whole app. Returns the signed-in email (or 'dev@localhost' in dev bypass).
-    Renders a login/deny screen and st.stop()s when access is not granted."""
+    """Gate the whole app. Renders the password screen and st.stop()s until the
+    correct password is entered. Returns a short identifier for the session."""
 
-    # 1) LOCAL DEV BYPASS — must come first so we never touch st.user when auth isn't configured.
+    # 1) LOCAL DEV BYPASS — never gate during local dev when explicitly enabled.
     if _dev_bypass():
         with st.sidebar:
             st.warning("🔓 DEV MODE — auth bypassed (local only)")
         return "dev@localhost"
 
-    # 2) Require a Google login. st.user.is_logged_in errors if [auth] isn't configured,
-    #    so guide the operator instead of crashing.
-    try:
-        logged_in = bool(st.user.is_logged_in)
-    except Exception:
-        st.title("⚙️ Authentication not configured")
-        st.write("Google sign-in (`[auth]`) is not set up in this app's secrets.")
-        st.write("For local testing without OAuth, set `[app] dev_no_auth = true` in "
-                 "`.streamlit/secrets.toml`. For deployment, fill the `[auth]` block "
-                 "(see `secrets.toml.example`).")
-        st.stop()
+    # 2) SESSION TIMEOUT — expire an old session so an unattended tab re-locks.
+    if st.session_state.get("_authed"):
+        now = time.time()
+        started = st.session_state.get("_authed_at", now)
+        if (now - started) > _timeout_seconds():
+            st.session_state.pop("_authed", None)
+            st.session_state.pop("_authed_at", None)
 
-    if not logged_in:
+    # 3) GATE — show the password screen until they're in.
+    if not st.session_state.get("_authed"):
         _login_screen()
         st.stop()
 
-    email = (getattr(st.user, "email", "") or "").strip().lower()
-
-    # 3) ALLOW-LIST check.
-    if not is_allowed(email):
-        _deny_screen(email)
-        st.stop()
-
-    # 4) SESSION TIMEOUT. Streamlit's identity cookie lasts 30 days and is not idle-aware,
-    #    so enforce our own idle + absolute timeout on top, then a manual st.logout().
-    now = time.time()
-    timeout = _timeout_seconds()
-    started = st.session_state.get("_auth_started")
-    last    = st.session_state.get("_auth_last", now)
-    if started is None:
-        st.session_state["_auth_started"] = now
-        started = now
-    if (now - last) > timeout or (now - started) > timeout:
-        st.session_state.pop("_auth_started", None)
-        st.session_state.pop("_auth_last", None)
-        st.logout()
-        st.stop()
-    st.session_state["_auth_last"] = now
-
-    # 5) Identity + logout control in the sidebar.
+    # 4) Logout control in the sidebar.
     with st.sidebar:
-        st.caption(f"👤 {email}")
-        st.button("Log out", on_click=st.logout, use_container_width=True)
+        if st.button("Log out", use_container_width=True):
+            st.session_state.pop("_authed", None)
+            st.session_state.pop("_authed_at", None)
+            st.rerun()
 
-    return email
+    return "user"
