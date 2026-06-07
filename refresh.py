@@ -33,6 +33,7 @@ YEARS          = 20
 OUTPUT_DIR     = "vivek_output"
 CACHE_PKL      = os.path.join(OUTPUT_DIR, "dashboard_cache.pkl")
 MIN_PRICE_FRACTION = 0.5        # if fewer than this fraction of tickers priced -> looks broken, don't overwrite
+MIN_FUND_FRACTION  = 0.25       # if fewer than this fraction have fundamentals -> Yahoo blocked .info run-wide, don't overwrite
 RETRY_PASSES       = 2          # extra price passes for the stragglers (transient Yahoo throttling, not real delisting)
 RETRY_COOLDOWN_S   = 30         # wait between passes to let Yahoo's rate-limit window reset
 RETRY_WORKERS      = 4          # gentler concurrency on retries so we don't re-trigger the throttle
@@ -120,19 +121,20 @@ def read_superstar_tickers():
     except Exception as e:
         print(f"  (superstar moves unavailable — {e}; caching V-universe only)", flush=True)
         return []
-    if "ticker" not in df.columns:
+    if "ticker" not in df.columns or "investor" not in df.columns:
+        # 'investor' is the join key for the quality contract; without it we can't tell whose picks
+        # these are, so cache nothing extra rather than caching every (incl. low-quality) buy.
         return []
     if "move" in df.columns:                       # only NEW buys + ADDs (what they're accumulating)
         df = df[df["move"].astype(str).str.upper().isin(("NEW", "ADD"))]
-    if "investor" in df.columns:                   # ...and only from the quality superstars above
-        df = df[df["investor"].astype(str).str.strip().str.lower().isin(good)]
+    df = df[df["investor"].astype(str).str.strip().str.lower().isin(good)]   # ...only the quality superstars
     out = set()
     for x in df["ticker"].dropna():
         t = str(x).strip().upper()
-        core = t[:-2] if t.endswith(".0") else t      # gspread may render a scrip code as "532540.0"
-        if not t or t.lower() == "nan" or core.isdigit():   # skip blanks + bare BSE scrip-codes / numeric IDs —
-            continue                                         # yfinance can't fetch a number on .NS or .BO
-        out.add(t)
+        core = t[:-2] if t.endswith(".0") else t      # gspread may render a scrip code / stray float as "532540.0"
+        if not core or core.lower() == "nan" or core.isdigit():   # skip blanks + bare BSE scrip-codes / numeric IDs —
+            continue                                              # yfinance can't fetch a number on .NS or .BO
+        out.add(core)                                 # canonical symbol (also drops a stray trailing ".0")
     return sorted(out)
 
 
@@ -232,6 +234,8 @@ def main():
                                                   workers=RETRY_WORKERS).items() if df is not None}
         data.update(recovered)
         print(f"  recovered {len(recovered)}/{len(missing)} on retry {attempt}", flush=True)
+        if not recovered:                          # this pass rescued nothing -> the rest are truly dead; stop early
+            break                                  # (avoids a needless RETRY_COOLDOWN_S sleep + refetch of dead symbols)
     _still_missing = [t for t in all_t if t not in data]
     if _still_missing:
         print(f"  {len(_still_missing)} unrecovered after {RETRY_PASSES} retries (likely truly delisted / "
@@ -248,6 +252,13 @@ def main():
     if _v_priced < max(1, int(MIN_PRICE_FRACTION * len(v_t))):
         sys.exit(f"ERROR: only {_v_priced}/{len(v_t)} V-universe price series fetched — looks broken; "
                  "NOT overwriting the cache.")
+    # Same idea for fundamentals: .info/.financials hit different Yahoo endpoints than price history, so they
+    # can be throttled run-wide while prices succeed. Don't let a fundamentals outage overwrite good 'fund'
+    # data with blanks (which would silently zero out the track-record / TTM-high signal gates on the dashboard).
+    _v_fund = sum(1 for t in v_t if (fund.get(t) or {}))
+    if _v_fund < max(1, int(MIN_FUND_FRACTION * len(v_t))):
+        sys.exit(f"ERROR: only {_v_fund}/{len(v_t)} V-universe fundamentals fetched — fundamentals look "
+                 "blocked/empty run-wide; NOT overwriting (keeps yesterday's good fundamentals).")
 
     payload = {"groups": groups, "data": data, "fund": fund,
                "built": now, "built_prices": now, "built_fund": now}

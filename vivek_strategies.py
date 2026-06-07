@@ -953,7 +953,8 @@ def fetch_fundamentals(ticker):
     {} on failure. yfinance gives ~4-5 quarters and ~4 years for free."""
     try:
         import yfinance as yf
-        tk = q = None
+        tk = q = af = None
+        _tk_a = _af_a = None                      # annual-only fallback (an exchange whose quarterly is empty)
         for suffix in (".NS", ".BO"):             # NSE first, then BSE (BSE-only / NSE-missing names)
             _tk = yf.Ticker(f"{ticker}{suffix}")
             try:
@@ -961,14 +962,24 @@ def fetch_fundamentals(ticker):
             except Exception:
                 _q = None
             if _q is not None and not getattr(_q, "empty", True):
-                tk, q = _tk, _q
+                tk, q = _tk, _q                   # preferred: this exchange has quarterly data
                 break
-        if tk is None or q is None or getattr(q, "empty", True):
+            if _tk_a is None:                     # quarterly empty here — keep it ONLY if it has ANNUAL data
+                try:
+                    _af = _tk.financials
+                except Exception:
+                    _af = None
+                if _af is not None and not getattr(_af, "empty", True):
+                    _tk_a, _af_a = _tk, _af       # some smaller names expose only annual statements on Yahoo
+        if tk is not None:                        # got quarterly -> fetch its annual too
+            try:
+                af = tk.financials        # annual income statement (newest first)
+            except Exception:
+                af = None
+        elif _tk_a is not None:                   # no quarterly anywhere -> fall back to annual-only (q stays None)
+            tk, q, af = _tk_a, None, _af_a        # raw_series() below tolerates q=None and yields annual-derived data
+        else:                                     # neither quarterly nor annual on either exchange
             return {}
-        try:
-            af = tk.financials        # annual income statement (newest first)
-        except Exception:
-            af = None
 
         def raw_series(frame, names):
             """Pick the first matching row, drop NaN, order oldest -> newest."""

@@ -568,6 +568,9 @@ def build_full_cache(groups, do_prices=True, do_fund=True, prev=None):
     import concurrent.futures
     prev = prev or {}
     all_t = sorted(set().union(*[set(v) for v in groups.values()])) if groups else []
+    # ALSO refresh any off-universe tickers the nightly build cached (e.g. quality-superstar picks) —
+    # otherwise a manual in-app price refresh would silently drop every non-V-universe series.
+    all_t = sorted(set(all_t) | set(prev.get("data") or {}) | set(prev.get("fund") or {}))
     data = dict(prev.get("data") or {})           # default: keep existing
     fund = dict(prev.get("fund") or {})
     now = datetime.now().isoformat()
@@ -587,11 +590,13 @@ def build_full_cache(groups, do_prices=True, do_fund=True, prev=None):
         prog.empty()
         return out
 
-    if do_prices:
-        data = {t: df for t, df in _parallel(_fetch_one_raw, "prices").items() if df is not None}
+    if do_prices:                                  # merge: keep a prior series for any ticker that fails to refetch
+        got = _parallel(_fetch_one_raw, "prices")
+        data.update({t: df for t, df in got.items() if df is not None})
         ts_prices = now
-    if do_fund:
-        fund = {t: (f or {}) for t, f in _parallel(vs.fetch_fundamentals, "fundamentals").items()}
+    if do_fund:                                    # merge: keep prior fundamentals for any that come back empty
+        got = _parallel(vs.fetch_fundamentals, "fundamentals")
+        fund.update({t: f for t, f in got.items() if f})
         ts_fund = now
 
     payload = {"groups": groups, "data": data, "fund": fund,
@@ -1924,6 +1929,11 @@ if _mode == "🔔 Alerts":
         st.markdown(f"**What changed:** 🟢 **{_cnt['NEW']}** new buys · 🔵 **{_cnt['ADD']}** added · "
                     f"🟠 **{_cnt['TRIM']}** trimmed · 🔴 **{_cnt['EXIT']}** exited "
                     "— across all tracked superstars this quarter.")
+        if "as_of" in _mv0.columns:                # surface freshness: moves persist from the last scrape that found any
+            _mvd = pd.to_datetime(_mv0["as_of"], errors="coerce").max()
+            if pd.notna(_mvd):
+                st.caption(f"🕒 Moves as of **{_mvd.date()}** (last notebook run). A quarter with no new moves "
+                           "keeps the prior scrape — re-run the notebook to refresh.")
         with st.expander("🔎 See which stocks superstars moved on"):
             _topnew = (_mv0[_mc0 == "NEW"].groupby(["ticker", "company"], dropna=False).agg(
                           investors=("investor", "nunique"),
