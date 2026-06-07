@@ -644,16 +644,17 @@ def build_investable_table(token, off_tickers=()):
     v_tickers = sorted(set().union(*[set(v) for v in groups.values()])) if groups else []
     vset = set(v_tickers)
     off = [t for t in off_tickers if t not in vset]
+    missing = [t for t in off if t not in datac]      # cached (nightly) superstar tickers need no live fetch
 
     def _grab(t):
         try:
-            return _fetch_one_raw(t)              # off-universe: thread-safe live fetch
+            return _fetch_one_raw(t)              # only the few not yet in cache → thread-safe live fetch
         except Exception:
             return None
     live = {}
-    if off:
+    if missing:
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
-            for t, df in zip(off, ex.map(_grab, off)):
+            for t, df in zip(missing, ex.map(_grab, missing)):
                 live[t] = df
 
     rows = []
@@ -1433,8 +1434,9 @@ if _mode == "💎 Investable now":
     _ijc[1].button("📊 Analyze", use_container_width=True, on_click=_open_stock,
                    args=(_ipick, "💎 Investable now"))
     st.caption("Off-universe (superstar) names are checked against **all** strategies; V-group names against the "
-               "strategies designed for their group. Built from the nightly cache + a live fetch of off-universe "
-               "prices (refreshes ~30 min). Fundamentals-based signals (Lifetime-High, 3×3) show only for cached names.")
+               "strategies designed for their group. Everything is read from the **nightly cache** (rebuilt at 5 PM, "
+               "now including superstar stocks) — so this loads instantly. Any name not yet in the cache is "
+               "live-fetched once, then cached ~30 min.")
     st.stop()
 
 # ============================================================================

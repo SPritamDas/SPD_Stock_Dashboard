@@ -32,6 +32,10 @@ YEARS          = 20
 OUTPUT_DIR     = "vivek_output"
 CACHE_PKL      = os.path.join(OUTPUT_DIR, "dashboard_cache.pkl")
 MIN_PRICE_FRACTION = 0.5        # if fewer than this fraction of tickers priced -> looks broken, don't overwrite
+# FII/DII superstar workbook — so the cache ALSO covers off-universe / superstar-held stocks.
+# The app's "Investable now" page then reads those from cache instead of live-fetching them → fast.
+FII_SHEET_KEY  = "1rIFmhm37XEJsfXV2Nn1QPfakLG9xvMmEsjJ7YYule8g"
+SUPERSTAR_TAB  = "superstar_moves"
 
 
 def _service_account_info():
@@ -63,6 +67,24 @@ def read_groups():
             groups[col] = sorted({str(x).strip().upper() for x in df[col].dropna()
                                   if str(x).strip() and str(x).strip().lower() != "nan"})
     return groups
+
+
+def read_superstar_tickers():
+    """NSE tickers the superstars hold/moved (FII/DII workbook → superstar_moves tab). Caching
+    these lets the dashboard's off-universe / superstar picks load from cache instead of being
+    live-fetched. Best-effort: returns [] if the tab is missing (e.g. the notebook step failed),
+    so the critical V-universe cache build is never blocked by it."""
+    from gspread_dataframe import get_as_dataframe
+    try:
+        ws = _gspread_client().open_by_key(FII_SHEET_KEY).worksheet(SUPERSTAR_TAB)
+        df = get_as_dataframe(ws, evaluate_formulas=True).dropna(how="all")
+    except Exception as e:
+        print(f"  (superstar tickers unavailable — {e}; building V-universe only)", flush=True)
+        return []
+    if "ticker" not in df.columns:
+        return []
+    return sorted({str(x).strip().upper() for x in df["ticker"].dropna()
+                   if str(x).strip() and str(x).strip().lower() != "nan"})
 
 
 def fetch_one(ticker, years=YEARS):
@@ -123,10 +145,15 @@ def main():
 
     print("Reading group lists from Google Sheet…", flush=True)
     groups = read_groups()
-    all_t = sorted(set().union(*[set(v) for v in groups.values()])) if groups else []
-    print(f"{len(all_t)} unique tickers across groups {list(groups)}", flush=True)
-    if not all_t:
+    v_t = sorted(set().union(*[set(v) for v in groups.values()])) if groups else []
+    print(f"{len(v_t)} unique V-universe tickers across groups {list(groups)}", flush=True)
+    if not v_t:
         sys.exit("ERROR: no tickers in stock_classifications — refusing to overwrite the cache.")
+
+    print("Reading superstar / off-universe tickers…", flush=True)
+    extra = [t for t in read_superstar_tickers() if t not in set(v_t)]
+    all_t = sorted(set(v_t) | set(extra))
+    print(f"+ {len(extra)} superstar/off-universe tickers → {len(all_t)} total to cache", flush=True)
 
     now = datetime.now().isoformat()
 
@@ -136,9 +163,12 @@ def main():
     print("Fetching fundamentals…", flush=True)
     fund = {t: (f or {}) for t, f in _parallel(vs.fetch_fundamentals, all_t, "fundamentals").items()}
 
-    # Safety: a broken/blocked fetch shouldn't clobber a good cache with mostly-empty data.
-    if len(data) < max(1, int(MIN_PRICE_FRACTION * len(all_t))):
-        sys.exit(f"ERROR: only {len(data)}/{len(all_t)} price series fetched — looks broken; "
+    # Safety: a broken/blocked fetch shouldn't clobber a good cache. Gate on the V-UNIVERSE
+    # coverage (the critical set) — superstar/off-universe tickers are best-effort and some may
+    # legitimately fail to price (delisted / odd symbols), which must not abort the whole build.
+    _v_priced = sum(1 for t in v_t if t in data)
+    if _v_priced < max(1, int(MIN_PRICE_FRACTION * len(v_t))):
+        sys.exit(f"ERROR: only {_v_priced}/{len(v_t)} V-universe price series fetched — looks broken; "
                  "NOT overwriting the cache.")
 
     payload = {"groups": groups, "data": data, "fund": fund,
