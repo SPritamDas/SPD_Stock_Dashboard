@@ -70,10 +70,11 @@ def read_groups():
 
 
 def read_superstar_tickers():
-    """NSE tickers the superstars hold/moved (FII/DII workbook → superstar_moves tab). Caching
-    these lets the dashboard's off-universe / superstar picks load from cache instead of being
-    live-fetched. Best-effort: returns [] if the tab is missing (e.g. the notebook step failed),
-    so the critical V-universe cache build is never blocked by it."""
+    """NSE tickers the superstars NEWLY BOUGHT or ADDED to this quarter (move in NEW/ADD) — the
+    actionable 'what smart money is buying' set, NOT the full holdings universe. Caching just these
+    keeps the nightly build fast and the cache small while still covering the off-universe picks the
+    'Investable now' page cares about. Best-effort: returns [] if the tab is missing, so the critical
+    V-universe build is never blocked by it."""
     from gspread_dataframe import get_as_dataframe
     try:
         ws = _gspread_client().open_by_key(FII_SHEET_KEY).worksheet(SUPERSTAR_TAB)
@@ -83,6 +84,8 @@ def read_superstar_tickers():
         return []
     if "ticker" not in df.columns:
         return []
+    if "move" in df.columns:                       # only NEW buys + ADDs (what they're accumulating)
+        df = df[df["move"].astype(str).str.upper().isin(("NEW", "ADD"))]
     return sorted({str(x).strip().upper() for x in df["ticker"].dropna()
                    if str(x).strip() and str(x).strip().lower() != "nan"})
 
@@ -150,10 +153,10 @@ def main():
     if not v_t:
         sys.exit("ERROR: no tickers in stock_classifications — refusing to overwrite the cache.")
 
-    print("Reading superstar / off-universe tickers…", flush=True)
+    print("Reading superstar buys (NEW/ADD) to also cache…", flush=True)
     extra = [t for t in read_superstar_tickers() if t not in set(v_t)]
     all_t = sorted(set(v_t) | set(extra))
-    print(f"+ {len(extra)} superstar/off-universe tickers → {len(all_t)} total to cache", flush=True)
+    print(f"+ {len(extra)} superstar NEW/ADD tickers → {len(all_t)} total to cache", flush=True)
 
     now = datetime.now().isoformat()
 
