@@ -17,6 +17,7 @@ cache that makes the dashboard fast.
 import os
 import sys
 import json
+import time
 import pickle
 import concurrent.futures
 from datetime import datetime, timedelta
@@ -32,6 +33,9 @@ YEARS          = 20
 OUTPUT_DIR     = "vivek_output"
 CACHE_PKL      = os.path.join(OUTPUT_DIR, "dashboard_cache.pkl")
 MIN_PRICE_FRACTION = 0.5        # if fewer than this fraction of tickers priced -> looks broken, don't overwrite
+RETRY_PASSES       = 2          # extra price passes for the stragglers (transient Yahoo throttling, not real delisting)
+RETRY_COOLDOWN_S   = 30         # wait between passes to let Yahoo's rate-limit window reset
+RETRY_WORKERS      = 4          # gentler concurrency on retries so we don't re-trigger the throttle
 # FII/DII superstar workbook — so the cache ALSO covers off-universe / superstar-held stocks.
 # The app's "Investable now" page then reads those from cache instead of live-fetching them → fast.
 FII_SHEET_KEY  = "1rIFmhm37XEJsfXV2Nn1QPfakLG9xvMmEsjJ7YYule8g"
@@ -91,15 +95,24 @@ def read_superstar_tickers():
 
 
 def fetch_one(ticker, years=YEARS):
-    """Faithful copy of the app's _fetch_one_raw: daily OHLCV via yfinance (.NS) with a
-    fast_info backfill of the trailing all-NaN bar so prices aren't a day stale."""
+    """Faithful copy of the app's _fetch_one_raw: daily OHLCV via yfinance — tries NSE (.NS)
+    first, then falls back to BSE (.BO) for names that are BSE-only or transiently missing on
+    NSE — with a fast_info backfill of the trailing all-NaN bar so prices aren't a day stale."""
     import yfinance as yf
     today = datetime.now().date()
     end = today + timedelta(days=1)              # yfinance `end` is EXCLUSIVE -> +1 to include today
     start = today - timedelta(days=years * 365)
-    tk = yf.Ticker(f"{ticker}.NS")
-    df = tk.history(start=start, end=end, interval="1d")
-    if df.empty:
+    tk = df = None
+    for suffix in (".NS", ".BO"):                # NSE first, then BSE (BSE-only / NSE-missing names)
+        _tk = yf.Ticker(f"{ticker}{suffix}")
+        try:
+            _df = _tk.history(start=start, end=end, interval="1d")
+        except Exception:
+            _df = None
+        if _df is not None and not _df.empty:
+            tk, df = _tk, _df
+            break
+    if df is None or df.empty:
         return None
     df = df.reset_index()
     cols = [c for c in ("Open", "High", "Low", "Close") if c in df.columns]
@@ -162,6 +175,26 @@ def main():
 
     print("Fetching prices…", flush=True)
     data = {t: df for t, df in _parallel(fetch_one, all_t, "prices").items() if df is not None}
+
+    # Retry stragglers: most "possibly delisted / no timezone found" misses are transient Yahoo
+    # rate-limiting, not real delistings. Re-fetch ONLY the misses after a cooldown, with gentler
+    # concurrency — recovers the bulk of them without slowing the common path.
+    for attempt in range(1, RETRY_PASSES + 1):
+        missing = [t for t in all_t if t not in data]
+        if not missing:
+            break
+        print(f"  {len(missing)} still missing after pass {attempt} — cooling {RETRY_COOLDOWN_S}s then retrying…",
+              flush=True)
+        time.sleep(RETRY_COOLDOWN_S)
+        recovered = {t: df for t, df in _parallel(fetch_one, missing, f"prices-retry{attempt}",
+                                                  workers=RETRY_WORKERS).items() if df is not None}
+        data.update(recovered)
+        print(f"  recovered {len(recovered)}/{len(missing)} on retry {attempt}", flush=True)
+    _still_missing = [t for t in all_t if t not in data]
+    if _still_missing:
+        print(f"  {len(_still_missing)} unrecovered after {RETRY_PASSES} retries (likely truly delisted / "
+              f"not on NSE or BSE): {', '.join(_still_missing[:15])}{' …' if len(_still_missing) > 15 else ''}",
+              flush=True)
 
     print("Fetching fundamentals…", flush=True)
     fund = {t: (f or {}) for t, f in _parallel(vs.fetch_fundamentals, all_t, "fundamentals").items()}

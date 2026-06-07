@@ -156,14 +156,23 @@ def get_groups(cache):
 
 
 def _fetch_one_raw(ticker, years=YEARS):
-    """Plain fetch — safe to call from worker threads (no Streamlit cache)."""
+    """Plain fetch — safe to call from worker threads (no Streamlit cache). Tries NSE (.NS)
+    first, then falls back to BSE (.BO) for names that are BSE-only or transiently missing on NSE."""
     import yfinance as yf
     today = datetime.now().date()
     end = today + timedelta(days=1)              # yfinance `end` is EXCLUSIVE -> +1 to include today's candle
     start = today - timedelta(days=years * 365)
-    tk = yf.Ticker(f"{ticker}.NS")
-    df = tk.history(start=start, end=end, interval="1d")
-    if df.empty:
+    tk = df = None
+    for suffix in (".NS", ".BO"):                # NSE first, then BSE (BSE-only / NSE-missing names)
+        _tk = yf.Ticker(f"{ticker}{suffix}")
+        try:
+            _df = _tk.history(start=start, end=end, interval="1d")
+        except Exception:
+            _df = None
+        if _df is not None and not _df.empty:
+            tk, df = _tk, _df
+            break
+    if df is None or df.empty:
         return None
     df = df.reset_index()
     cols = [c for c in ("Open", "High", "Low", "Close") if c in df.columns]

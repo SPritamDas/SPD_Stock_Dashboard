@@ -953,9 +953,17 @@ def fetch_fundamentals(ticker):
     {} on failure. yfinance gives ~4-5 quarters and ~4 years for free."""
     try:
         import yfinance as yf
-        tk = yf.Ticker(f"{ticker}.NS")
-        q = tk.quarterly_financials   # rows = line items, cols = quarters (newest first)
-        if q is None or q.empty:
+        tk = q = None
+        for suffix in (".NS", ".BO"):             # NSE first, then BSE (BSE-only / NSE-missing names)
+            _tk = yf.Ticker(f"{ticker}{suffix}")
+            try:
+                _q = _tk.quarterly_financials   # rows = line items, cols = quarters (newest first)
+            except Exception:
+                _q = None
+            if _q is not None and not getattr(_q, "empty", True):
+                tk, q = _tk, _q
+                break
+        if tk is None or q is None or getattr(q, "empty", True):
             return {}
         try:
             af = tk.financials        # annual income statement (newest first)
