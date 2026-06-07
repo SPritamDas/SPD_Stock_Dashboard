@@ -631,6 +631,74 @@ def scan_strategy(skey, token):
     return out
 
 
+@st.cache_data(show_spinner="Building the investable list…", ttl=1800)
+def build_investable_table(token, off_tickers=()):
+    """One row per (ticker, strategy) currently READY/REVIEW — across the V-universe plus any
+    off-universe `off_tickers` (superstar holdings, live-fetched in parallel). Columns mirror the
+    KPI block (entry/target/metrics/backtest history). Keyed by `token` (cache version) so it only
+    rebuilds when the cache changes; ttl caps staleness. Uses module globals `cache`/`groups`
+    (same pattern as multi_strategy_status)."""
+    import concurrent.futures
+    datac = (cache or {}).get("data", {})
+    fundc = (cache or {}).get("fund", {})
+    v_tickers = sorted(set().union(*[set(v) for v in groups.values()])) if groups else []
+    vset = set(v_tickers)
+    off = [t for t in off_tickers if t not in vset]
+
+    def _grab(t):
+        try:
+            return _fetch_one_raw(t)              # off-universe: thread-safe live fetch
+        except Exception:
+            return None
+    live = {}
+    if off:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
+            for t, df in zip(off, ex.map(_grab, off)):
+                live[t] = df
+
+    rows = []
+    for t in v_tickers + off:
+        df = datac.get(t) if t in datac else live.get(t)
+        if df is None or len(df) < 30:
+            continue
+        mem = [g for g in ("v_40", "v_40_next", "v_200") if t in set(groups.get(g, []))]
+        glabel = " / ".join(GROUP_LABELS.get(g, g) for g in mem) or "All-NSE"
+        appl = (list(vs.STRATEGY_CONFIG.keys()) if not mem      # off-universe → check every strategy
+                else [s for s, c in vs.STRATEGY_CONFIG.items()
+                      if ("ALL_NSE" in c["groups"]) or (set(c["groups"]) & set(mem))])
+        for skey in appl:
+            fund = fundc.get(t) if skey in ("lifetime_high", "three_x_three") else None
+            try:
+                kk = core.kpi_block(core.analyze(skey, t, df, fundamentals=fund))
+            except Exception:
+                continue
+            if kk.get("ready") not in ("YES", "REVIEW"):       # keep only actionable rows
+                continue
+            rows.append({
+                "Reviewed": False,
+                "Ticker": t,
+                "Group": glabel,
+                "Strategy": core.STRATEGY_LABELS.get(skey, skey),
+                "Status": {"YES": "🟢 READY", "REVIEW": "🟡 REVIEW"}.get(kk["ready"], kk["ready"]),
+                "Entry": kk["entry"],
+                "Target": kk["target"],
+                "Exp Profit %": kk["exp_profit_pct"],
+                "Success %": kk["success_rate"],
+                "Exp. days": kk["exp_duration_days"] or None,
+                "Median days": kk["median_days"] or None,
+                "Opportunities": kk["total_ops"],
+                "Avg Win %": kk["avg_win_profit"],
+                "Last Opp": (pd.to_datetime(kk["last_opp_date"]).date()
+                             if kk["last_opp_date"] is not None else None),
+            })
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        order = {"🟢 READY": 0, "🟡 REVIEW": 1}
+        out["_o"] = out["Status"].map(order).fillna(2)
+        out = out.sort_values(["_o", "Exp Profit %"], ascending=[True, False]).drop(columns="_o").reset_index(drop=True)
+    return out
+
+
 def _fmt_num(x):
     """Pretty-print a calc result: thousands separators, up to 6 dp, no trailing zeros."""
     if isinstance(x, bool) or not isinstance(x, (int, float)):
@@ -1293,14 +1361,81 @@ if _goto:
 
 # ---- mode toggle (top of sidebar): Stocks  ⟷  Indices ----
 with st.sidebar:
-    _mode = st.radio("Mode", ["📊 Stocks", "🌐 Indices", "⭐ Superstars", "🔔 Alerts"],
+    _mode = st.radio("Mode", ["📊 Stocks", "🌐 Indices", "⭐ Superstars", "🔔 Alerts", "💎 Investable now"],
                      horizontal=True, key="app_mode")
 
 # single heading per mode (no duplicate title)
 st.title("📈 SPritamDas — " + {"🌐 Indices": "Index Analysis", "⭐ Superstars": "Superstar Analysis",
-                                "🔔 Alerts": "FII/DII Alerts"}.get(_mode, "Stock Analysis"))
+                                "🔔 Alerts": "FII/DII Alerts", "💎 Investable now": "Investable Now"}.get(_mode, "Stock Analysis"))
 render_floating_calculator()   # 🧮 draggable, always-on-top calculator (hovers over the chart)
 render_floating_notes()        # 📒 draggable, always-on-top notes (context-aware, persists in the browser)
+
+# ============================================================================
+# 💎 INVESTABLE NOW MODE  — master table of every actionable (READY/REVIEW) setup
+# ============================================================================
+if _mode == "💎 Investable now":
+    st.markdown("## 💎 Investable now — every actionable setup (one row per stock · strategy)")
+    if not cache or not cache.get("data"):
+        st.warning("No price cache loaded yet — the nightly data build hasn't run, or it's still "
+                   "downloading. Try again in a moment, or build it from the **📊 Stocks** sidebar.")
+        st.stop()
+    # off-universe = stocks superstars hold/moved that aren't in your V40 / V40-N / V200 groups
+    _ioff = ()
+    try:
+        _imv = fetch_superstar_moves()
+        if not _imv.empty and "ticker" in _imv.columns:
+            _ivset = set().union(*[set(v) for v in groups.values()]) if groups else set()
+            _ioff = tuple(sorted({str(t).strip().upper() for t in _imv["ticker"].dropna()
+                                  if str(t).strip() and str(t).strip().upper() not in _ivset}))
+    except Exception:
+        _ioff = ()
+    _inv = build_investable_table((cache.get("built", "none") if cache else "none"), _ioff)
+    if _inv.empty:
+        st.info("Nothing is **READY** or **REVIEW** across your universe right now. "
+                "Check back after the next 5 PM refresh.")
+        st.stop()
+    _ready_n = int((_inv["Status"] == "🟢 READY").sum())
+    _rev_n = int((_inv["Status"] == "🟡 REVIEW").sum())
+    st.caption(f"**{len(_inv)}** setups — 🟢 **{_ready_n}** READY · 🟡 **{_rev_n}** REVIEW · across "
+               f"**{_inv['Ticker'].nunique()}** stocks (incl. **{len(_ioff)}** off-universe / superstar picks). "
+               "Tick **✓** as you review each · click any column header to sort.")
+    _icols = ["Reviewed", "Ticker", "Group", "Strategy", "Status", "Entry", "Target", "Exp Profit %",
+              "Success %", "Exp. days", "Median days", "Opportunities", "Avg Win %", "Last Opp"]
+    _iedit = st.data_editor(
+        _inv, hide_index=True, use_container_width=True, height=620, column_order=_icols,
+        disabled=[c for c in _icols if c != "Reviewed"],
+        key="investable_editor_" + hashlib.md5("|".join((_inv["Ticker"] + "·" + _inv["Strategy"]).astype(str)).encode()).hexdigest()[:8],
+        column_config={
+            "Reviewed": st.column_config.CheckboxColumn("✓", width="small", help="Tick the ones you've reviewed."),
+            "Ticker": st.column_config.TextColumn("Ticker", width="small"),
+            "Group": st.column_config.TextColumn("Group", width="small"),
+            "Strategy": st.column_config.TextColumn("Strategy"),
+            "Status": st.column_config.TextColumn("Status", width="small"),
+            "Entry": st.column_config.NumberColumn("Entry", format="%.2f"),
+            "Target": st.column_config.NumberColumn("Target", format="%.2f"),
+            "Exp Profit %": st.column_config.NumberColumn("Exp Profit %", format="%.1f"),
+            "Success %": st.column_config.NumberColumn("Success %", format="%.1f"),
+            "Exp. days": st.column_config.NumberColumn("Exp. days", format="%d"),
+            "Median days": st.column_config.NumberColumn("Median days", format="%d"),
+            "Opportunities": st.column_config.NumberColumn("Opps", format="%d", width="small"),
+            "Avg Win %": st.column_config.NumberColumn("Avg Win %", format="%.1f"),
+            "Last Opp": st.column_config.DateColumn("Last Opp"),
+        })
+    try:
+        st.caption(f"✓ Reviewed **{int(_iedit['Reviewed'].sum())}/{len(_iedit)}** (resets when the app restarts).")
+    except Exception:
+        pass
+    st.markdown("---")
+    _ijc = st.columns([3, 1])
+    _ipick = _ijc[0].selectbox("Open a stock in 📊 Stock Analysis →",
+                               options=sorted(_inv["Ticker"].unique()), key="inv_jump")
+    _ijc[1].markdown("&nbsp;")
+    _ijc[1].button("📊 Analyze", use_container_width=True, on_click=_open_stock,
+                   args=(_ipick, "💎 Investable now"))
+    st.caption("Off-universe (superstar) names are checked against **all** strategies; V-group names against the "
+               "strategies designed for their group. Built from the nightly cache + a live fetch of off-universe "
+               "prices (refreshes ~30 min). Fundamentals-based signals (Lifetime-High, 3×3) show only for cached names.")
+    st.stop()
 
 # ============================================================================
 # INDICES ANALYSIS MODE  (separate page; reuses the same chart engine/indicators)
@@ -1786,6 +1921,36 @@ if _mode == "🔔 Alerts":
         else:
             st.caption(f"📅 Latest disclosed quarter in our data: **{_latest_q}** — no new data since last check.")
 
+    # ---- 🔎 WHAT CHANGED — which stocks/portfolios the superstars actually moved on ----
+    _mv0 = fetch_superstar_moves()
+    if not _mv0.empty and {"move", "ticker"}.issubset(_mv0.columns):
+        _mc0 = _mv0["move"].astype(str).str.upper()
+        _cnt = {k: int((_mc0 == k).sum()) for k in ("NEW", "ADD", "TRIM", "EXIT")}
+        st.markdown(f"**What changed:** 🟢 **{_cnt['NEW']}** new buys · 🔵 **{_cnt['ADD']}** added · "
+                    f"🟠 **{_cnt['TRIM']}** trimmed · 🔴 **{_cnt['EXIT']}** exited "
+                    "— across all tracked superstars this quarter.")
+        with st.expander("🔎 See which stocks superstars moved on"):
+            _topnew = (_mv0[_mc0 == "NEW"].groupby(["ticker", "company"], dropna=False).agg(
+                          investors=("investor", "nunique"),
+                          avg_stake=("latest_stake", lambda s: round(float(pd.to_numeric(s, errors="coerce").mean()), 2)),
+                          value_cr=("value_cr", lambda s: round(float(pd.to_numeric(s, errors="coerce").fillna(0).sum()), 1)),
+                       ).reset_index().sort_values(["investors", "value_cr"], ascending=False).head(20)
+                       ) if _cnt["NEW"] else pd.DataFrame()
+            if not _topnew.empty:
+                st.markdown("**🟢 Most-bought NEW positions** (ranked by how many superstars bought in):")
+                st.dataframe(_topnew, hide_index=True, use_container_width=True,
+                             column_config={
+                                 "ticker": st.column_config.TextColumn("Ticker"),
+                                 "company": st.column_config.TextColumn("Company"),
+                                 "investors": st.column_config.NumberColumn("# superstars", format="%d"),
+                                 "avg_stake": st.column_config.NumberColumn("Avg stake %", format="%.2f%%"),
+                                 "value_cr": st.column_config.NumberColumn("Σ value ₹Cr", format="%.1f"),
+                             })
+            else:
+                st.caption("No brand-new positions this quarter — superstars mostly held / adjusted existing names.")
+            st.caption("This counts **all** tracked superstars. The criteria-filtered 'best investor' new buys are "
+                       "in the **🆕 New buys** section below.")
+
     # ---- 🚨 PIPELINE HEALTH (flags issues in the data/notebook pipeline) ----
     with st.container(border=True):
         st.markdown("### 🚨 Pipeline health")
@@ -1838,29 +2003,38 @@ if _mode == "🔔 Alerts":
 
     # ---- ✅ ALERT CRITERIA (defaults = your spec; tweakable) ----
     st.markdown("### ✅ Alert criteria")
-    _ac = st.columns(4)
-    _asig = _ac[0].multiselect("Signal (any of)", ["STRONG BUY", "BUY", "WATCH", "HOLD", "AVOID"],
-                               default=["STRONG BUY", "BUY"], key="alert_sig")
-    _ash = _ac[1].number_input("Min Sharpe", value=0.5, step=0.1, format="%.2f", key="alert_sh")
-    _add = _ac[2].number_input("Max DD ≥ %", value=-40.0, step=5.0, key="alert_dd",
-                               help="Drawdown not worse than this.")
-    _aal = _ac[3].number_input("Min Alpha % (optional)", value=None, step=1.0, key="alert_al", placeholder="—")
+    _af1 = st.columns([3, 3])
+    _aq = _af1[0].text_input("🔎 Search investor", key="alert_q").strip().lower()
+    _asig = _af1[1].multiselect("Signal (any of)", ["STRONG BUY", "BUY", "WATCH", "HOLD", "AVOID"],
+                                default=["STRONG BUY", "BUY"], key="alert_sig")
+    _af2 = st.columns(4)
+    _ash = _af2[0].number_input("Min Sharpe", value=0.5, step=0.1, format="%.2f", key="alert_sh")
+    _aal = _af2[1].number_input("Min Alpha %", value=None, step=1.0, key="alert_al", placeholder="—")
+    _aann = _af2[2].number_input("Min Ann ret %", value=None, step=1.0, key="alert_minann", placeholder="—")
+    _add = _af2[3].number_input("Max DD ≥ %", value=-40.0, step=5.0, key="alert_dd",
+                                help="Drawdown not worse than this.")
 
     def _qualify(df):
         if df.empty:
             return df
         m = pd.Series(True, index=df.index)
+        if _aq and "name" in df.columns:
+            m &= df["name"].astype(str).str.lower().str.contains(_aq, na=False)
         if _asig and "signal" in df.columns:
             m &= df["signal"].astype(str).isin(_asig)
         if _ash is not None and "sharpe_ratio" in df.columns:
             m &= pd.to_numeric(df["sharpe_ratio"], errors="coerce") >= _ash
-        if _add is not None and "max_drawdown_pct" in df.columns:
-            m &= pd.to_numeric(df["max_drawdown_pct"], errors="coerce") >= _add
         if _aal is not None and "alpha_ann_pct" in df.columns:
             m &= pd.to_numeric(df["alpha_ann_pct"], errors="coerce") >= _aal
+        if _aann is not None and "ann_return_pct" in df.columns:
+            m &= pd.to_numeric(df["ann_return_pct"], errors="coerce") >= _aann
+        if _add is not None and "max_drawdown_pct" in df.columns:
+            m &= pd.to_numeric(df["max_drawdown_pct"], errors="coerce") >= _add
         return df[m]
 
     _qual = _qualify(_sdf)
+    st.caption(f"Showing **{len(_qual)}/{len(_sdf)}** investors. Filters combine with **AND**; numeric "
+               "filters apply only when you enter a value.")
 
     # ---- 📋 CURRENT ALERT LIST ----
     with st.container(border=True):
