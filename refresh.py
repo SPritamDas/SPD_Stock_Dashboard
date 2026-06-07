@@ -90,8 +90,14 @@ def read_superstar_tickers():
         return []
     if "move" in df.columns:                       # only NEW buys + ADDs (what they're accumulating)
         df = df[df["move"].astype(str).str.upper().isin(("NEW", "ADD"))]
-    return sorted({str(x).strip().upper() for x in df["ticker"].dropna()
-                   if str(x).strip() and str(x).strip().lower() != "nan"})
+    out = set()
+    for x in df["ticker"].dropna():
+        t = str(x).strip().upper()
+        core = t[:-2] if t.endswith(".0") else t      # gspread may render a scrip code as "532540.0"
+        if not t or t.lower() == "nan" or core.isdigit():   # skip blanks + bare BSE scrip-codes / numeric IDs —
+            continue                                         # yfinance can't fetch a number on .NS or .BO
+        out.add(t)
+    return sorted(out)
 
 
 def fetch_one(ticker, years=YEARS):
