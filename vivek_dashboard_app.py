@@ -252,6 +252,13 @@ def fetch_superstar_moves():
     return _read_fii_tab("superstar_moves")
 
 
+@st.cache_data(show_spinner=False, ttl=21600)
+def fetch_quarter_updates():
+    """Per-investor quarter advances (detected_on · name · prev_quarter · new_quarter) — the notebook
+    logs an investor here whenever their disclosed quarter (data_to) advances run-over-run."""
+    return _read_fii_tab("quarter_updates")
+
+
 _TL_HEADERS = {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                               "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"),
                "Accept-Language": "en-US,en;q=0.9"}
@@ -1895,33 +1902,38 @@ if _mode == "🔔 Alerts":
 
     st.markdown("## 🔔 FII/DII alerts — quality superstar buys (vs **Nifty 50**)")
 
-    # ---- 📢 NEW-QUARTER ALERT — fires once when our data advances to a newer disclosed quarter ----
+    # ---- 📢 PORTFOLIO QUARTER UPDATES — WHICH investors just advanced to a newer disclosed quarter ----
+    # Per-investor change detection: the notebook diffs each investor's data_to run-over-run and logs
+    # the advances to `quarter_updates`. This replaces the old single-global-quarter banner (which
+    # mislabeled an in-progress quarter as "disclosed").
     _latest_q = None
     if not _sdf.empty and "data_to" in _sdf.columns:
         _lq = pd.to_datetime(_sdf["data_to"], errors="coerce").max()
         if pd.notna(_lq):
             _latest_q = _lq.date().isoformat()
-    _state_path = os.path.join(OUTPUT_DIR, "alerts_state.json")
-    _prev_q = None
-    try:
-        if os.path.exists(_state_path):
-            _prev_q = json.load(open(_state_path)).get("last_quarter")
-    except Exception:
-        _prev_q = None
-    if _latest_q:
-        if _latest_q != _prev_q:                       # new (or first-seen) quarter → persistent alert until acked
-            _cn = st.columns([6, 1])
-            _cn[0].success(f"📢 **New quarter data — superstar portfolios changed!** Latest disclosed quarter is "
-                           f"now **{_latest_q}**" + (f" (was {_prev_q})." if _prev_q else " (now tracking).")
-                           + "  See **🆕 New buys by your best investors** below.")
-            if _cn[1].button("✓ Seen", use_container_width=True):
-                try:
-                    json.dump({"last_quarter": _latest_q}, open(_state_path, "w"))
-                except Exception:
-                    pass
-                st.rerun()
-        else:
-            st.caption(f"📅 Latest disclosed quarter in our data: **{_latest_q}** — no new data since last check.")
+    _qu = fetch_quarter_updates()
+    _recent = pd.DataFrame()
+    if not _qu.empty and {"detected_on", "name"}.issubset(_qu.columns):
+        _last_run = _qu["detected_on"].astype(str).max()
+        _recent = _qu[_qu["detected_on"].astype(str) == _last_run].copy()
+    if not _recent.empty:
+        st.success(f"📢 **{len(_recent)} portfolio(s) just published a newer quarter** — detected {_last_run}. "
+                   "See exactly who & what changed below. 👇")
+        with st.expander(f"📢 Which portfolios updated their quarter ({len(_recent)})", expanded=True):
+            _qcols = [c for c in ["name", "prev_quarter", "new_quarter"] if c in _recent.columns]
+            st.dataframe(_recent[_qcols].reset_index(drop=True), hide_index=True, use_container_width=True,
+                         height=min(380, 70 + 35 * len(_recent)),
+                         column_config={
+                             "name": st.column_config.TextColumn("Investor"),
+                             "prev_quarter": st.column_config.TextColumn("Was"),
+                             "new_quarter": st.column_config.TextColumn("Now"),
+                         })
+            st.caption("These investors' Trendlyne data advanced to a newer disclosed quarter since the previous "
+                       "run (tracked daily by the notebook in the `quarter_updates` tab).")
+    else:
+        st.caption("📭 No portfolio quarter-updates recorded yet — once the notebook has run twice, any investor "
+                   "advancing to a newer quarter is listed here." +
+                   (f"  ·  Latest quarter present in our data: **{_latest_q}**." if _latest_q else ""))
 
     # ---- 🔎 WHAT CHANGED — which stocks/portfolios the superstars actually moved on ----
     _mv0 = fetch_superstar_moves()
