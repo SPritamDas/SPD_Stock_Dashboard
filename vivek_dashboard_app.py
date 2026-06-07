@@ -639,42 +639,24 @@ def scan_strategy(skey, token):
 
 
 @st.cache_data(show_spinner="Building the investable list…", ttl=1800)
-def build_investable_table(token, off_tickers=()):
-    """One row per (ticker, strategy) currently READY/REVIEW — across the V-universe plus any
-    off-universe `off_tickers` (superstar holdings, live-fetched in parallel). Columns mirror the
-    KPI block (entry/target/metrics/backtest history). Keyed by `token` (cache version) so it only
-    rebuilds when the cache changes; ttl caps staleness. Uses module globals `cache`/`groups`
-    (same pattern as multi_strategy_status)."""
-    import concurrent.futures
+def build_investable_table(token, strategies=("v20", "lifetime_high", "fifty_two_low")):
+    """One row per (ticker, strategy) currently READY/REVIEW, for the chosen `strategies` only,
+    across EVERY ticker already in the cache (V-universe + any superstar stocks the nightly build
+    cached). Reads ONLY cached data — never live-fetches — so it's fast regardless of universe size.
+    The chosen strategies are applied to ALL companies (not gated by group design). Columns mirror
+    the KPI block. Keyed by `token` (cache version). Uses module globals `cache`/`groups`."""
     datac = (cache or {}).get("data", {})
     fundc = (cache or {}).get("fund", {})
-    v_tickers = sorted(set().union(*[set(v) for v in groups.values()])) if groups else []
-    vset = set(v_tickers)
-    off = [t for t in off_tickers if t not in vset]
-    missing = [t for t in off if t not in datac]      # cached (nightly) superstar tickers need no live fetch
-
-    def _grab(t):
-        try:
-            return _fetch_one_raw(t)              # only the few not yet in cache → thread-safe live fetch
-        except Exception:
-            return None
-    live = {}
-    if missing:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
-            for t, df in zip(missing, ex.map(_grab, missing)):
-                live[t] = df
+    strategies = tuple(s for s in strategies if s in vs.STRATEGY_CONFIG)
 
     rows = []
-    for t in v_tickers + off:
-        df = datac.get(t) if t in datac else live.get(t)
+    for t in sorted(datac.keys()):
+        df = datac.get(t)
         if df is None or len(df) < 30:
             continue
         mem = [g for g in ("v_40", "v_40_next", "v_200") if t in set(groups.get(g, []))]
         glabel = " / ".join(GROUP_LABELS.get(g, g) for g in mem) or "All-NSE"
-        appl = (list(vs.STRATEGY_CONFIG.keys()) if not mem      # off-universe → check every strategy
-                else [s for s, c in vs.STRATEGY_CONFIG.items()
-                      if ("ALL_NSE" in c["groups"]) or (set(c["groups"]) & set(mem))])
-        for skey in appl:
+        for skey in strategies:
             fund = fundc.get(t) if skey in ("lifetime_high", "three_x_three") else None
             try:
                 kk = core.kpi_block(core.analyze(skey, t, df, fundamentals=fund))
@@ -1387,25 +1369,15 @@ if _mode == "💎 Investable now":
         st.warning("No price cache loaded yet — the nightly data build hasn't run, or it's still "
                    "downloading. Try again in a moment, or build it from the **📊 Stocks** sidebar.")
         st.stop()
-    # off-universe = stocks superstars hold/moved that aren't in your V40 / V40-N / V200 groups
-    _ioff = ()
-    try:
-        _imv = fetch_superstar_moves()
-        if not _imv.empty and "ticker" in _imv.columns:
-            _ivset = set().union(*[set(v) for v in groups.values()]) if groups else set()
-            _ioff = tuple(sorted({str(t).strip().upper() for t in _imv["ticker"].dropna()
-                                  if str(t).strip() and str(t).strip().upper() not in _ivset}))
-    except Exception:
-        _ioff = ()
-    _inv = build_investable_table((cache.get("built", "none") if cache else "none"), _ioff)
+    _inv = build_investable_table((cache.get("built", "none") if cache else "none"))
     if _inv.empty:
-        st.info("Nothing is **READY** or **REVIEW** across your universe right now. "
-                "Check back after the next 5 PM refresh.")
+        st.info("Nothing is **READY** or **REVIEW** across the cached universe right now "
+                "(strategies: **V20 · Lifetime High · 52-Week Low**). Check back after the next 5 PM refresh.")
         st.stop()
     _ready_n = int((_inv["Status"] == "🟢 READY").sum())
     _rev_n = int((_inv["Status"] == "🟡 REVIEW").sum())
     st.caption(f"**{len(_inv)}** setups — 🟢 **{_ready_n}** READY · 🟡 **{_rev_n}** REVIEW · across "
-               f"**{_inv['Ticker'].nunique()}** stocks (incl. **{len(_ioff)}** off-universe / superstar picks). "
+               f"**{_inv['Ticker'].nunique()}** stocks · strategies: **V20 · Lifetime High · 52-Week Low**. "
                "Tick **✓** as you review each · click any column header to sort.")
     _icols = ["Reviewed", "Ticker", "Group", "Strategy", "Status", "Entry", "Target", "Exp Profit %",
               "Success %", "Exp. days", "Median days", "Opportunities", "Avg Win %", "Last Opp"]
@@ -1440,10 +1412,10 @@ if _mode == "💎 Investable now":
     _ijc[1].markdown("&nbsp;")
     _ijc[1].button("📊 Analyze", use_container_width=True, on_click=_open_stock,
                    args=(_ipick, "💎 Investable now"))
-    st.caption("Off-universe (superstar) names are checked against **all** strategies; V-group names against the "
-               "strategies designed for their group. Everything is read from the **nightly cache** (rebuilt at 5 PM, "
-               "now including superstar stocks) — so this loads instantly. Any name not yet in the cache is "
-               "live-fetched once, then cached ~30 min.")
+    st.caption("Every company in the cache (V-universe + any superstar stocks the nightly build includes) is checked "
+               "against **V20 · Lifetime High · 52-Week Low**, applied to all of them regardless of group. Read "
+               "entirely from the **nightly cache** (rebuilt 5 PM) — no live fetching, so it loads in seconds. "
+               "To include the superstar/off-universe stocks, run the Action once so they get added to the cache.")
     st.stop()
 
 # ============================================================================
