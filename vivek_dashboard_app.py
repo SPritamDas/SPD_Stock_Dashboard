@@ -268,6 +268,57 @@ def fetch_quarter_updates():
     return _read_fii_tab("quarter_updates")
 
 
+@st.cache_data(show_spinner="Loading holdings journey…", ttl=21600)
+def _fetch_holdings_tab():
+    """Full per-investor HOLDINGS JOURNEY (investor · ticker · company · move · delta · value · qty +
+    one %-stake column per quarter), written nightly by the notebook's master_stock build → lets the
+    superstar detail page show the journey WITHOUT live-scraping Trendlyne (405-blocks Cloud servers)."""
+    return _read_fii_tab("superstar_holdings")
+
+
+def superstar_holdings_journey(investor_name):
+    """Reshape ONE investor's rows from the superstar_holdings tab into the DataFrame the page renders
+    (Stock · Ticker · Move · Δ stake · <quarter cols newest-first> · Holding Value · Qty Held).
+    Returns (df, quarters, error). No network — reads the pre-scraped sheet."""
+    df = _fetch_holdings_tab()
+    if df.empty or "investor" not in df.columns:
+        return pd.DataFrame(), [], ("holdings not built yet — run the notebook (its master_stock build "
+                                    "now also writes a `superstar_holdings` tab).")
+    sub = df[df["investor"].astype(str).str.strip().str.lower()
+             == str(investor_name).strip().lower()].copy()
+    if sub.empty:
+        return pd.DataFrame(), [], "no holdings stored for this investor yet — re-run the notebook."
+
+    _MON = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+    def _is_q(c):
+        p = str(c).split()
+        return len(p) == 2 and p[0] in _MON and p[1].isdigit() and len(p[1]) == 4
+
+    def _qk(c):
+        try:
+            return pd.Timestamp(str(c))
+        except Exception:
+            return pd.Timestamp("1900-01-01")
+
+    def _col(name, default=""):
+        return sub[name] if name in sub.columns else pd.Series([default] * len(sub), index=sub.index)
+
+    qcols = [c for c in sub.columns if _is_q(c) and pd.to_numeric(sub[c], errors="coerce").notna().any()]
+    qcols = sorted(qcols, key=_qk, reverse=True)
+    out = pd.DataFrame({
+        "Stock":   _col("company"),
+        "Ticker":  _col("ticker"),
+        "Move":    _col("move"),
+        "Δ stake": pd.to_numeric(_col("delta", None), errors="coerce"),
+    })
+    for q in qcols:
+        out[q] = pd.to_numeric(sub[q], errors="coerce")
+    out["Holding Value"] = pd.to_numeric(_col("value_cr", None), errors="coerce")
+    out["Qty Held"] = _col("qty")
+    return out.reset_index(drop=True), qcols, ""
+
+
 _TL_HEADERS = {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                               "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"),
                "Accept-Language": "en-US,en;q=0.9"}
@@ -1804,69 +1855,68 @@ if _mode == "⭐ Superstars":
                 st.caption(_u("interpretation"))
 
         _link = _u("links") or _u("portfolio_url")
-        if not _link:
-            st.info("No Trendlyne portfolio link stored for this investor.")
+        _hold, _quarters, _err = superstar_holdings_journey(_pick)
+        if _hold.empty:
+            st.warning(f"Couldn't load the holdings journey: {_err}")
+            if _link:
+                st.markdown(f"🔗 [Open {_pick.title()}'s portfolio on Trendlyne →]({_link})")
         else:
-            _hold, _quarters, _err = fetch_superstar_holdings(_link)
-            if _hold.empty:
-                st.warning(f"Couldn't load the holdings journey: {_err}")
+            _latest = _quarters[0] if _quarters else ""
+            _vc = _hold["Move"].value_counts().to_dict()
+            st.markdown(f"#### 📜 Holdings journey — **{len(_hold)}** disclosed positions · "
+                        f"latest **{_latest}**: 🟢 {_vc.get('NEW', 0)} new · 🟢 {_vc.get('ADD', 0)} added · "
+                        f"🔴 {_vc.get('TRIM', 0)} trimmed · 🔴 {_vc.get('EXIT', 0)} exited")
+            # ---- holdings filters (Move + min Δ stake) ----
+            _hf = st.columns([4, 2, 4])
+            _mvs = _hf[0].multiselect("Move (any of)", ["NEW", "ADD", "TRIM", "EXIT", "HOLD", "past"],
+                                      key=f"hmv_{_pick}")
+            _mind = _hf[1].number_input("Min Δ stake %", value=None, step=0.1, format="%.2f",
+                                        key=f"hdl_{_pick}", placeholder="—",
+                                        help="e.g. 0.5 → only this-quarter moves of at least +0.5% stake.")
+            _holdf = _hold.copy()
+            if _mvs:
+                _holdf = _holdf[_holdf["Move"].isin(_mvs)]
+            if _mind is not None:
+                _holdf = _holdf[pd.to_numeric(_holdf["Δ stake"], errors="coerce").fillna(-1e9) >= _mind]
+            _holdf = _holdf.reset_index(drop=True)
+            if _holdf.empty:
+                st.info("No holdings match these filters — clear Move / Min Δ stake.")
             else:
-                _latest = _quarters[0] if _quarters else ""
-                _vc = _hold["Move"].value_counts().to_dict()
-                st.markdown(f"#### 📜 Holdings journey — **{len(_hold)}** disclosed positions · "
-                            f"latest **{_latest}**: 🟢 {_vc.get('NEW', 0)} new · 🟢 {_vc.get('ADD', 0)} added · "
-                            f"🔴 {_vc.get('TRIM', 0)} trimmed · 🔴 {_vc.get('EXIT', 0)} exited")
-                # ---- holdings filters (Move + min Δ stake) ----
-                _hf = st.columns([4, 2, 4])
-                _mvs = _hf[0].multiselect("Move (any of)", ["NEW", "ADD", "TRIM", "EXIT", "HOLD", "past"],
-                                          key=f"hmv_{_pick}")
-                _mind = _hf[1].number_input("Min Δ stake %", value=None, step=0.1, format="%.2f",
-                                            key=f"hdl_{_pick}", placeholder="—",
-                                            help="e.g. 0.5 → only this-quarter moves of at least +0.5% stake.")
-                _holdf = _hold.copy()
-                if _mvs:
-                    _holdf = _holdf[_holdf["Move"].isin(_mvs)]
-                if _mind is not None:
-                    _holdf = _holdf[pd.to_numeric(_holdf["Δ stake"], errors="coerce").fillna(-1e9) >= _mind]
-                _holdf = _holdf.reset_index(drop=True)
-                if _holdf.empty:
-                    st.info("No holdings match these filters — clear Move / Min Δ stake.")
-                else:
-                    _EMO = {"NEW": "🟢 NEW", "ADD": "🟢 ADD", "TRIM": "🔴 TRIM",
-                            "EXIT": "🔴 EXIT", "HOLD": "⚪ HOLD", "past": "· past"}
-                    _dh = _holdf.copy()
-                    _dh["Move"] = _dh["Move"].map(lambda m: _EMO.get(m, m))
-                    _order = ["Stock", "Ticker", "Move", "Δ stake"] + _quarters + ["Holding Value", "Qty Held"]
-                    _dh = _dh[[c for c in _order if c in _dh.columns]]
-                    _cfg = {q: st.column_config.NumberColumn(q, format="%.1f%%") for q in _quarters}
-                    _cfg["Δ stake"] = st.column_config.NumberColumn(
-                        "Δ stake", format="%+.2f%%", help="Latest-quarter change in % stake (price-independent).")
-                    _htok = hashlib.md5(("|".join(_holdf["Stock"].astype(str)) + "|" + _pick).encode()).hexdigest()[:10]
-                    _hev = st.dataframe(_dh, hide_index=True, use_container_width=True, height=540,
-                                        on_select="rerun", selection_mode="single-row",
-                                        key="sstar_hold_" + _htok, column_config=_cfg)
-                    st.caption(f"Showing **{len(_holdf)}/{len(_hold)}** positions. Each quarter column = the "
-                               "investor's disclosed **% stake** (only ≥1% reported; '–' = not held / below "
-                               "threshold). **% stake moves only when they buy or sell** — price doesn't affect it. "
-                               "(e.g. Move = NEW + ADD · Min Δ stake 0.5 → only this quarter's real accumulations.)")
+                _EMO = {"NEW": "🟢 NEW", "ADD": "🟢 ADD", "TRIM": "🔴 TRIM",
+                        "EXIT": "🔴 EXIT", "HOLD": "⚪ HOLD", "past": "· past"}
+                _dh = _holdf.copy()
+                _dh["Move"] = _dh["Move"].map(lambda m: _EMO.get(m, m))
+                _order = ["Stock", "Ticker", "Move", "Δ stake"] + _quarters + ["Holding Value", "Qty Held"]
+                _dh = _dh[[c for c in _order if c in _dh.columns]]
+                _cfg = {q: st.column_config.NumberColumn(q, format="%.1f%%") for q in _quarters}
+                _cfg["Δ stake"] = st.column_config.NumberColumn(
+                    "Δ stake", format="%+.2f%%", help="Latest-quarter change in % stake (price-independent).")
+                _htok = hashlib.md5(("|".join(_holdf["Stock"].astype(str)) + "|" + _pick).encode()).hexdigest()[:10]
+                _hev = st.dataframe(_dh, hide_index=True, use_container_width=True, height=540,
+                                    on_select="rerun", selection_mode="single-row",
+                                    key="sstar_hold_" + _htok, column_config=_cfg)
+                st.caption(f"Showing **{len(_holdf)}/{len(_hold)}** positions. Each quarter column = the "
+                           "investor's disclosed **% stake** (only ≥1% reported; '–' = not held / below "
+                           "threshold). **% stake moves only when they buy or sell** — price doesn't affect it. "
+                           "(e.g. Move = NEW + ADD · Min Δ stake 0.5 → only this quarter's real accumulations.)")
 
-                    # click a holding row → open that company in full Stock Analysis
-                    _hsel = _hev.selection["rows"] if _hev and _hev.selection else []
-                    if _hsel and _hsel[0] < len(_holdf):
-                        _hrow = _holdf.iloc[_hsel[0]]
-                        _htk = str(_hrow.get("Ticker", "") or "").strip()
-                        _hstock = str(_hrow.get("Stock", ""))
-                        if _htk:
-                            st.button(f"📊  Open {_hstock} ({_htk}) in Stock Analysis  →  fundamentals · chart · indicators",
-                                      key=f"openstk_{_htok}_{_htk}", use_container_width=True,
-                                      on_click=_open_stock, args=(_htk, f"⭐ {_pick.title()}'s portfolio"))
-                            st.caption("Opens the full stock page (price position, fundamentals & every strategy's "
-                                       "signal) so you can vet this superstar pick before acting.")
-                        else:
-                            st.info(f"Couldn't read an NSE symbol for **{_hstock}** — it may not be NSE-listed "
-                                    "(open it manually in Stock Analysis).")
+                # click a holding row → open that company in full Stock Analysis
+                _hsel = _hev.selection["rows"] if _hev and _hev.selection else []
+                if _hsel and _hsel[0] < len(_holdf):
+                    _hrow = _holdf.iloc[_hsel[0]]
+                    _htk = str(_hrow.get("Ticker", "") or "").strip()
+                    _hstock = str(_hrow.get("Stock", ""))
+                    if _htk:
+                        st.button(f"📊  Open {_hstock} ({_htk}) in Stock Analysis  →  fundamentals · chart · indicators",
+                                  key=f"openstk_{_htok}_{_htk}", use_container_width=True,
+                                  on_click=_open_stock, args=(_htk, f"⭐ {_pick.title()}'s portfolio"))
+                        st.caption("Opens the full stock page (price position, fundamentals & every strategy's "
+                                   "signal) so you can vet this superstar pick before acting.")
                     else:
-                        st.caption("👆 Click any holding row to open that company in **Stock Analysis**.")
+                        st.info(f"Couldn't read an NSE symbol for **{_hstock}** — it may not be NSE-listed "
+                                "(open it manually in Stock Analysis).")
+                else:
+                    st.caption("👆 Click any holding row to open that company in **Stock Analysis**.")
     else:
         st.info("👆 **Click an investor's row** above to open their holdings journey.")
 
