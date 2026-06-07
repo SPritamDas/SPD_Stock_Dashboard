@@ -1948,6 +1948,31 @@ if _mode == "🔔 Alerts":
                              })
             else:
                 st.caption("No brand-new positions this quarter — superstars mostly held / adjusted existing names.")
+            # ---- 👤 whose results are in for this quarter + what each of them did ----
+            if not _sdf.empty and "data_to" in _sdf.columns:
+                _dt_str = pd.to_datetime(_sdf["data_to"], errors="coerce").dt.date.astype(str)
+                _n_fresh = int((_dt_str == _latest_q).sum())
+                st.markdown(f"**📅 {_n_fresh} of {len(_sdf)}** tracked superstars have published **{_latest_q}** data.")
+            if "investor" in _mv0.columns:
+                _mU = _mv0["move"].astype(str).str.upper()
+                _byinv = (_mv0.assign(_m=_mU).groupby("investor").agg(
+                              NEW=("_m", lambda s: int((s == "NEW").sum())),
+                              ADD=("_m", lambda s: int((s == "ADD").sum())),
+                              TRIM=("_m", lambda s: int((s == "TRIM").sum())),
+                              EXIT=("_m", lambda s: int((s == "EXIT").sum())),
+                              total=("_m", "count"),
+                          ).reset_index().sort_values("total", ascending=False).reset_index(drop=True))
+                st.markdown(f"**👤 Which superstars changed** — {len(_byinv)} investors disclosed moves this quarter "
+                            "(click a column header to sort):")
+                st.dataframe(_byinv, hide_index=True, use_container_width=True, height=320,
+                             column_config={
+                                 "investor": st.column_config.TextColumn("Investor"),
+                                 "NEW": st.column_config.NumberColumn("🟢 New", format="%d"),
+                                 "ADD": st.column_config.NumberColumn("🔵 Added", format="%d"),
+                                 "TRIM": st.column_config.NumberColumn("🟠 Trimmed", format="%d"),
+                                 "EXIT": st.column_config.NumberColumn("🔴 Exited", format="%d"),
+                                 "total": st.column_config.NumberColumn("Σ moves", format="%d"),
+                             })
             st.caption("This counts **all** tracked superstars. The criteria-filtered 'best investor' new buys are "
                        "in the **🆕 New buys** section below.")
 
