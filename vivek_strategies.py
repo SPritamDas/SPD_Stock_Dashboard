@@ -159,8 +159,10 @@ def summarize_trades(total_ops, details):
     Success_Rate_% = successes / CLOSED trades — 'Open' trades (still held / target
     not yet reached) are EXCLUDED from the denominator so they don't drag the rate
     down. Closed = Success + Slow (off-pace) + Loss.
-    Duration stats (Avg/Median/Pct/Exp) are over ALL CLOSED trades (how long a trade
-    typically takes to resolve), not just successes. Win % stays success-only."""
+    Duration stats (Avg/Median/Pct/Exp) span CLOSED trades PLUS still-OPEN positions'
+    elapsed time so far (today - entry): counting only resolved trades hides the long-running
+    ones (still open) and biases expected duration short. Win % / rates stay success-only over
+    CLOSED trades (an open trade is neither a win nor a loss yet)."""
     succ = [d for d in details if d.get("Result") == "Success"]
     n = len(succ)
     closed = [d for d in details if d.get("Result") != "Open"]   # resolved trades only
@@ -168,7 +170,8 @@ def summarize_trades(total_ops, details):
     n_nonloss = sum(1 for d in closed if d.get("Result") != "Loss")   # reached target (on/off-pace)
     rate = (n / n_closed * 100) if n_closed else 0
     nonloss_rate = (n_nonloss / n_closed * 100) if n_closed else 0
-    durs = [d["Days_to_Exit"] for d in closed if d.get("Days_to_Exit") is not None]
+    # include OPEN trades' elapsed duration too (they now carry Days_to_Exit = today - entry)
+    durs = [d["Days_to_Exit"] for d in details if d.get("Days_to_Exit") is not None]
     profs = [d["Profit_%"] for d in succ if d.get("Profit_%") is not None]
     if durs:
         avg = int(round(np.mean(durs)))
@@ -261,9 +264,9 @@ def _backtest_entries(df, entries):
         elif hit_j is not None:                               # hit, but too slow
             details.append({**base, "Result": "Slow (off-pace)", "Exit_Date": df["Date"].iloc[hit_j],
                             "Days_to_Exit": hit_j - i, "Profit_%": gain})
-        else:                                                 # never reached target
+        else:                                                 # never reached target -> still OPEN
             details.append({**base, "Result": "Open", "Exit_Date": None,
-                            "Days_to_Exit": None, "Profit_%": None})
+                            "Days_to_Exit": (n - 1) - i, "Profit_%": None})   # elapsed days so far (today - entry)
     details = _dedupe_open_trades(details)                    # one open position per price level
     total = len(details)
     durations = [d["Days_to_Exit"] for d in details if d.get("Result") == "Success"]
@@ -340,11 +343,11 @@ def strategy_sma(df, **kw):
                 "Exit_Date": df["Date"].iloc[exit_i], "Days_to_Exit": d,
                 "Profit_%": round((exit_px - entry_px) / entry_px * 100, 2)})
             in_pos = False
-    if in_pos:                                       # still holding at end-of-data
+    if in_pos:                                       # still holding at end-of-data -> OPEN
         total += 1
         details.append({"Entry_Date": df["Date"].iloc[entry_i], "Entry_Price": round(entry_px, 2),
-                        "Target_Price": np.nan, "Result": "Open",
-                        "Exit_Date": None, "Days_to_Exit": None, "Profit_%": None})
+                        "Target_Price": np.nan, "Result": "Open", "Exit_Date": None,
+                        "Days_to_Exit": (len(df) - 1) - entry_i, "Profit_%": None})   # elapsed days (today - entry)
 
     stats = summarize_trades(total, details)
     cur = float(close.iloc[-1])
@@ -427,11 +430,11 @@ def strategy_knoxville(df, momentum=20, rsi_len=14, overbought=70, oversold=30,
                 "Exit_Date": df["Date"].iloc[exit_i], "Days_to_Exit": d,
                 "Profit_%": round((exit_px - entry_px) / entry_px * 100, 2)})
             in_pos = False
-    if in_pos:                                       # still holding at end-of-data
+    if in_pos:                                       # still holding at end-of-data -> OPEN
         total += 1
         details.append({"Entry_Date": df["Date"].iloc[entry_i], "Entry_Price": round(entry_px, 2),
-                        "Target_Price": np.nan, "Result": "Open",
-                        "Exit_Date": None, "Days_to_Exit": None, "Profit_%": None})
+                        "Target_Price": np.nan, "Result": "Open", "Exit_Date": None,
+                        "Days_to_Exit": (len(df) - 1) - entry_i, "Profit_%": None})   # elapsed days (today - entry)
 
     stats = summarize_trades(total, details)
 

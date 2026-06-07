@@ -706,16 +706,19 @@ def scan_strategy(skey, token):
 @st.cache_data(show_spinner="Building the investable list…", ttl=1800)
 def build_investable_table(token, strategies=("v20", "lifetime_high", "fifty_two_low")):
     """One row per (ticker, strategy) currently READY/REVIEW, for the chosen `strategies` only,
-    across EVERY ticker already in the cache (V-universe + any superstar stocks the nightly build
-    cached). Reads ONLY cached data — never live-fetches — so it's fast regardless of universe size.
-    The chosen strategies are applied to ALL companies (not gated by group design). Columns mirror
-    the KPI block. Keyed by `token` (cache version). Uses module globals `cache`/`groups`."""
+    restricted to the V-UNIVERSE (V40 / V40 Next / V200) — the names these strategies are built for.
+    Reads ONLY cached data — never live-fetches — so it's fast. Columns mirror the KPI block.
+    Keyed by `token` (cache version). Uses module globals `cache`/`groups`."""
     datac = (cache or {}).get("data", {})
     fundc = (cache or {}).get("fund", {})
     strategies = tuple(s for s in strategies if s in vs.STRATEGY_CONFIG)
+    v_universe = set().union(*[set(groups.get(g, [])) for g in ("v_40", "v_40_next", "v_200")]) \
+        if groups else set()
 
     rows = []
     for t in sorted(datac.keys()):
+        if t not in v_universe:                        # Investable now = V-universe only (skip off-universe names)
+            continue
         df = datac.get(t)
         if df is None or len(df) < 30:
             continue
@@ -1477,10 +1480,10 @@ if _mode == "💎 Investable now":
     _ijc[1].markdown("&nbsp;")
     _ijc[1].button("📊 Analyze", use_container_width=True, on_click=_open_stock,
                    args=(_ipick, "💎 Investable now"))
-    st.caption("Every company in the cache (V-universe + any superstar stocks the nightly build includes) is checked "
-               "against **V20 · Lifetime High · 52-Week Low**, applied to all of them regardless of group. Read "
-               "entirely from the **nightly cache** (rebuilt 5 PM) — no live fetching, so it loads in seconds. "
-               "To include the superstar/off-universe stocks, run the Action once so they get added to the cache.")
+    st.caption("Every **V-universe** company (V40 · V40 Next · V200) is checked against "
+               "**V20 · Lifetime High · 52-Week Low** — the strategies these names are built for. Read entirely "
+               "from the **nightly cache** (rebuilt 5 PM) — no live fetching, so it loads in seconds. "
+               "**Exp./Median days** now include still-open positions' elapsed time, so long-running setups aren't hidden.")
     st.stop()
 
 # ============================================================================
