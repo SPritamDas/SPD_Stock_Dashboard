@@ -40,6 +40,9 @@ RETRY_WORKERS      = 4          # gentler concurrency on retries so we don't re-
 # The app's "Investable now" page then reads those from cache instead of live-fetching them → fast.
 FII_SHEET_KEY  = "1rIFmhm37XEJsfXV2Nn1QPfakLG9xvMmEsjJ7YYule8g"
 SUPERSTAR_TAB  = "superstar_moves"
+SUMMARY_TAB    = "fii_dii_indian_investment_summary"   # per-investor portfolio metrics (signal/return/drawdown)
+MAX_DRAWDOWN_FLOOR = -50.0          # only cache picks from investors whose worst drawdown is no worse than this (%)
+GOOD_SIGNALS   = ("BUY", "STRONG BUY")
 
 
 def _service_account_info():
@@ -73,23 +76,56 @@ def read_groups():
     return groups
 
 
-def read_superstar_tickers():
-    """NSE tickers the superstars NEWLY BOUGHT or ADDED to this quarter (move in NEW/ADD) — the
-    actionable 'what smart money is buying' set, NOT the full holdings universe. Caching just these
-    keeps the nightly build fast and the cache small while still covering the off-universe picks the
-    'Investable now' page cares about. Best-effort: returns [] if the tab is missing, so the critical
-    V-universe build is never blocked by it."""
+def _qualifying_superstars(client):
+    """Names of superstars whose PORTFOLIO clears the quality bar — signal in BUY/STRONG BUY,
+    annualised return above Nifty's, and max drawdown no worse than -50% (mirrors the dashboard's
+    own Superstar/alert filters). Only THEIR new buys are worth caching. Returns a set of lowercased
+    names (matches superstar_moves.investor); empty set on any failure -> caller caches V-universe only."""
     from gspread_dataframe import get_as_dataframe
     try:
-        ws = _gspread_client().open_by_key(FII_SHEET_KEY).worksheet(SUPERSTAR_TAB)
+        ws = client.open_by_key(FII_SHEET_KEY).worksheet(SUMMARY_TAB)
         df = get_as_dataframe(ws, evaluate_formulas=True).dropna(how="all")
     except Exception as e:
-        print(f"  (superstar tickers unavailable — {e}; building V-universe only)", flush=True)
+        print(f"  (superstar summary unavailable — {e}; caching V-universe only)", flush=True)
+        return set()
+    need = {"name", "signal", "ann_return_pct", "nifty_ann_return_pct", "max_drawdown_pct"}
+    missing = need - set(df.columns)
+    if missing:
+        print(f"  (summary missing columns {sorted(missing)}; caching V-universe only)", flush=True)
+        return set()
+    sig = df["signal"].astype(str).str.strip().str.upper()
+    arr = pd.to_numeric(df["ann_return_pct"],       errors="coerce")     # investor annualised return
+    bm  = pd.to_numeric(df["nifty_ann_return_pct"], errors="coerce")     # Nifty over the same window
+    mdd = pd.to_numeric(df["max_drawdown_pct"],     errors="coerce")     # negative (worst peak-to-trough)
+    keep = sig.isin(GOOD_SIGNALS) & (arr > bm) & (mdd >= MAX_DRAWDOWN_FLOOR)
+    names = {str(n).strip().lower() for n in df.loc[keep, "name"].dropna() if str(n).strip()}
+    print(f"  {len(names)}/{len(df)} superstars clear the quality bar "
+          f"(BUY/STRONG BUY · ann ret > Nifty · drawdown >= {MAX_DRAWDOWN_FLOOR:.0f}%)", flush=True)
+    return names
+
+
+def read_superstar_tickers():
+    """NSE tickers NEWLY BOUGHT or ADDED (move NEW/ADD) by QUALITY superstars only (see
+    _qualifying_superstars). This keeps the nightly build fast and the cache small while still
+    covering the off-universe picks the 'Investable now' page cares about. Best-effort: returns []
+    if the data is missing, so the critical V-universe build is never blocked by it."""
+    from gspread_dataframe import get_as_dataframe
+    client = _gspread_client()
+    good = _qualifying_superstars(client)
+    if not good:
+        return []
+    try:
+        ws = client.open_by_key(FII_SHEET_KEY).worksheet(SUPERSTAR_TAB)
+        df = get_as_dataframe(ws, evaluate_formulas=True).dropna(how="all")
+    except Exception as e:
+        print(f"  (superstar moves unavailable — {e}; caching V-universe only)", flush=True)
         return []
     if "ticker" not in df.columns:
         return []
     if "move" in df.columns:                       # only NEW buys + ADDs (what they're accumulating)
         df = df[df["move"].astype(str).str.upper().isin(("NEW", "ADD"))]
+    if "investor" in df.columns:                   # ...and only from the quality superstars above
+        df = df[df["investor"].astype(str).str.strip().str.lower().isin(good)]
     out = set()
     for x in df["ticker"].dropna():
         t = str(x).strip().upper()
@@ -172,10 +208,10 @@ def main():
     if not v_t:
         sys.exit("ERROR: no tickers in stock_classifications — refusing to overwrite the cache.")
 
-    print("Reading superstar buys (NEW/ADD) to also cache…", flush=True)
+    print("Reading QUALITY superstar buys (NEW/ADD) to also cache…", flush=True)
     extra = [t for t in read_superstar_tickers() if t not in set(v_t)]
     all_t = sorted(set(v_t) | set(extra))
-    print(f"+ {len(extra)} superstar NEW/ADD tickers → {len(all_t)} total to cache", flush=True)
+    print(f"+ {len(extra)} quality-superstar NEW/ADD tickers → {len(all_t)} total to cache", flush=True)
 
     now = datetime.now().isoformat()
 
