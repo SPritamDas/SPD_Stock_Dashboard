@@ -315,6 +315,59 @@ def fetch_market_bulkblock():
     return _read_fii_tab("market_bulkblock_deals")
 
 
+@st.cache_data(show_spinner=False, ttl=21600)
+def superstar_stock_scores():
+    """Per-stock conviction score from the superstar feeds (no prices; cheap + cached):
+    consensus (quality-weighted # of gurus holding, from master_stock) + recent buying flow
+    (quarterly moves + last-180d bulk/block, quality-weighted). Also carries the latest guru
+    BUY price/date/name per ticker for the entry / run-up calc."""
+    summ, ms = fetch_superstar_summary(), fetch_master_stock()
+    moves, bb = fetch_superstar_moves(), fetch_superstar_bulkblock()
+    if ms.empty or "ticker" not in ms.columns or "held_by" not in ms.columns:
+        return pd.DataFrame()
+    _sig = {"STRONG BUY": 2.0, "BUY": 1.3, "WATCH": 0.7, "HOLD": 0.4, "AVOID": 0.0}
+    if not summ.empty and "name" in summ.columns:
+        summ = summ.copy()
+        summ["qw"] = (summ.get("signal", "").map(_sig).fillna(0.5)
+                      * (1 + pd.to_numeric(summ.get("sharpe_ratio"), errors="coerce").clip(0, 2).fillna(0)))
+        qw = dict(zip(summ["name"].astype(str).str.lower().str.strip(), summ["qw"]))
+    else:
+        qw = {}
+    _q = lambda n: qw.get(str(n).strip().lower(), 0.5)
+    ms = ms.copy(); ms["ticker"] = ms["ticker"].astype(str)
+    ms["n_holders"] = pd.to_numeric(ms["superstar_count"], errors="coerce").fillna(0)
+    ms["qcons"] = ms["held_by"].apply(
+        lambda hb: sum(_q(n.replace(" …", "").replace("…", "")) for n in str(hb).split(",") if n.strip()))
+    _mvw = {"NEW": 3, "ADD": 2, "HOLD": 0, "TRIM": -2, "EXIT": -3, "past": 0}
+    if not moves.empty and "ticker" in moves.columns:
+        moves = moves.copy(); moves["ticker"] = moves["ticker"].astype(str)
+        moves["w"] = moves["move"].map(_mvw).fillna(0) * moves["investor"].map(_q)
+        fm = moves.groupby("ticker")["w"].sum()
+    else:
+        fm = pd.Series(dtype=float)
+    fb = pd.Series(dtype=float); lastbuy = pd.DataFrame()
+    if not bb.empty and "ticker" in bb.columns:
+        bb = bb.copy(); bb["ticker"] = bb["ticker"].astype(str)
+        bb["_dt"] = pd.to_datetime(bb["date"], format="mixed", dayfirst=True, errors="coerce")
+        bb["priceN"] = pd.to_numeric(bb["price"], errors="coerce")
+        _b = bb[bb["_dt"] >= pd.Timestamp.now() - pd.Timedelta(days=180)].copy()
+        _b["w"] = _b["action"].map({"BUY": 2, "SELL": -2}).fillna(0) * _b["investor"].map(_q)
+        fb = _b.groupby("ticker")["w"].sum()
+        _bu = bb[bb["action"].astype(str).str.upper() == "BUY"].dropna(subset=["_dt", "priceN"]).sort_values("_dt")
+        if not _bu.empty:
+            lastbuy = _bu.groupby("ticker").tail(1).set_index("ticker")[["priceN", "_dt", "investor"]]
+    s = ms[["ticker", "company", "n_holders", "qcons", "recent_action", "total_value_cr", "held_by"]].copy()
+    s["flow_raw"] = s["ticker"].map(fm).fillna(0) + s["ticker"].map(fb).fillna(0)
+    s["consensus"] = (s["qcons"] / s["qcons"].max() * 40) if s["qcons"].max() > 0 else 0
+    _f = s["flow_raw"]
+    s["flow"] = ((_f - _f.min()) / (_f.max() - _f.min()) * 30) if _f.max() > _f.min() else 0
+    s["base_score"] = s["consensus"] + s["flow"]
+    if not lastbuy.empty:
+        s["last_buy_price"] = s["ticker"].map(lastbuy["priceN"])
+        s["last_buy_by"] = s["ticker"].map(lastbuy["investor"])
+    return s.sort_values("base_score", ascending=False).reset_index(drop=True)
+
+
 @st.cache_data(show_spinner="Loading holdings journey…", ttl=21600)
 def _fetch_holdings_tab():
     """Full per-investor HOLDINGS JOURNEY (investor · ticker · company · move · delta · value · qty +
@@ -1466,14 +1519,88 @@ if _goto:
 
 # ---- mode toggle (top of sidebar): Stocks  ⟷  Indices ----
 with st.sidebar:
-    _mode = st.radio("Mode", ["📊 Stocks", "🌐 Indices", "⭐ Superstars", "🔔 Alerts", "💎 Investable now"],
+    _mode = st.radio("Mode", ["📊 Stocks", "🌐 Indices", "⭐ Superstars", "🔔 Alerts", "💎 Investable now", "💡 Allocate ₹"],
                      horizontal=True, key="app_mode")
 
 # single heading per mode (no duplicate title)
 st.title("📈 SPritamDas — " + {"🌐 Indices": "Index Analysis", "⭐ Superstars": "Superstar Analysis",
-                                "🔔 Alerts": "FII/DII Alerts", "💎 Investable now": "Investable Now"}.get(_mode, "Stock Analysis"))
+                                "🔔 Alerts": "FII/DII Alerts", "💎 Investable now": "Investable Now",
+                                "💡 Allocate ₹": "Suggest & Allocate"}.get(_mode, "Stock Analysis"))
 render_floating_calculator()   # 🧮 draggable, always-on-top calculator (hovers over the chart)
 render_floating_notes()        # 📒 draggable, always-on-top notes (context-aware, persists in the browser)
+
+# ============================================================================
+# 💡 ALLOCATE — score & size a budget across superstar-backed stocks
+# ============================================================================
+if _mode == "💡 Allocate ₹":
+    st.markdown("## 💡 Suggest & allocate — best superstar-backed stocks for your budget")
+    st.caption("A transparent, rules-based **screen + allocator** over public disclosures (superstar "
+               "holdings · recent moves · bulk/block) + live prices. **Not investment advice** — you follow "
+               "disclosed trades *after* they're filed; verify each name and size to your own risk.")
+    _sc = superstar_stock_scores()
+    if _sc.empty:
+        st.warning("No scoring data yet — run the notebook to populate master_stock / moves / bulk-block."); st.stop()
+    _c = st.columns([2, 2, 2])
+    _budget = _c[0].number_input("Budget ₹", value=50000, min_value=1000, step=5000)
+    _profile = _c[1].selectbox("Risk profile", ["Balanced", "Conservative", "Aggressive"],
+                               help="Balanced ~8 names · Conservative = liquid/diversified ~12 · Aggressive = concentrated ~5, small-caps OK")
+    _n = _c[2].number_input("How many stocks", value={"Balanced": 8, "Conservative": 12, "Aggressive": 5}[_profile],
+                            min_value=3, max_value=20, step=1)
+    _cand = _sc.copy()
+    _tv = pd.to_numeric(_cand["total_value_cr"], errors="coerce").fillna(0)
+    if _profile == "Conservative":
+        _cand = _cand[(_cand["n_holders"] >= 4) & (_tv >= _tv.quantile(0.5))]
+    elif _profile == "Balanced":
+        _cand = _cand[_cand["n_holders"] >= 3]
+    _cand = _cand.sort_values("base_score", ascending=False).head(35).copy()
+    with st.spinner("Fetching live prices for the top candidates…"):
+        _cand["price"] = _cand["ticker"].map(lambda t: _cur_price(t))
+    _cand = _cand[_cand["price"].notna() & (_cand["price"] > 0)].copy()
+    if _cand.empty:
+        st.info("No priced candidates matched this profile (many are BSE-only)."); st.stop()
+    _cand["runup_pct"] = _cand.apply(
+        lambda r: ((r["price"] - r["last_buy_price"]) / r["last_buy_price"] * 100)
+        if ("last_buy_price" in _cand.columns and pd.notna(r.get("last_buy_price")) and r.get("last_buy_price")) else None, axis=1)
+    _pen = {"Conservative": 2.0, "Balanced": 1.0, "Aggressive": 0.6}[_profile]
+    _cand["entry"] = _cand["runup_pct"].apply(lambda ru: 12.0 if pd.isna(ru) else float(max(0, 20 - max(0, ru) * 0.2 * _pen)))
+    _fmult = {"Aggressive": 1.6, "Balanced": 1.0, "Conservative": 0.8}[_profile]
+    _cand["final_score"] = _cand["consensus"] + _cand["flow"] * _fmult + _cand["entry"]
+    _top = _cand.sort_values("final_score", ascending=False).head(int(_n)).copy()
+    _w = _top["final_score"].clip(lower=0.1); _w = _w / _w.sum()
+    _w = _w.clip(upper=0.25); _w = _w / _w.sum()                       # diversification cap + renormalise
+    _top["target_inr"] = _w.values * _budget
+    _top["shares"] = (_top["target_inr"] // _top["price"]).astype(int)
+    _top["invest_inr"] = (_top["shares"] * _top["price"]).round(0)
+    _top["weight_pct"] = (_top["invest_inr"] / _budget * 100).round(1)
+    _deployed = _top["invest_inr"].sum(); _left = _budget - _deployed
+    def _why(r):
+        bits = [f"{int(r['n_holders'])} gurus hold"]
+        if isinstance(r.get("held_by"), str) and r["held_by"].strip():
+            bits[0] += " (e.g. " + ", ".join([x.strip() for x in r["held_by"].split(",")[:2]]) + ")"
+        if isinstance(r.get("recent_action"), str) and r["recent_action"].strip():
+            bits.append(r["recent_action"])
+        ru = r.get("runup_pct")
+        if pd.notna(ru):
+            bits.append(f"{'+' if ru >= 0 else ''}{ru:.0f}% since {str(r.get('last_buy_by', 'a guru')).title()}'s buy")
+        return " · ".join(bits)
+    _top["why"] = _top.apply(_why, axis=1)
+    st.markdown(f"### 📋 {_profile} plan for ₹{_budget:,.0f} — {len(_top)} stocks · "
+                f"₹{_deployed:,.0f} deployed · ₹{_left:,.0f} cash left (rounding)")
+    st.dataframe(
+        _top[["company", "ticker", "price", "invest_inr", "shares", "weight_pct", "final_score", "why"]],
+        hide_index=True, use_container_width=True, column_config={
+            "company": st.column_config.TextColumn("Stock"), "ticker": st.column_config.TextColumn("Ticker"),
+            "price": st.column_config.NumberColumn("Price ₹", format="%.1f"),
+            "invest_inr": st.column_config.NumberColumn("Invest ₹", format="%.0f"),
+            "shares": st.column_config.NumberColumn("Shares"),
+            "weight_pct": st.column_config.NumberColumn("Weight", format="%.1f%%"),
+            "final_score": st.column_config.NumberColumn("Score", format="%.0f"),
+            "why": st.column_config.TextColumn("Why", width="large")})
+    st.caption("**Score** = quality-weighted guru consensus + recent buying flow + entry (penalises names "
+               "already run up since the gurus' buys). Weights ∝ score, capped 25%/stock, whole shares at "
+               "live price; leftover is the rounding remainder. Prices ~1-day cached. **Verify each name in "
+               "📊 Stocks and confirm it fits your goals before buying — this is a screen, not advice.**")
+    st.stop()
 
 # ============================================================================
 # 💎 INVESTABLE NOW MODE  — master table of every actionable (READY/REVIEW) setup
