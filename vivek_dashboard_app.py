@@ -207,6 +207,22 @@ def fetch_one(ticker, years=YEARS):
     return _fetch_one_raw(ticker, years)
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def _cur_price(ticker):
+    """Latest close for a bulk/block ticker (tries NSE .NS then BSE .BO). Returns None for
+    BSE-numeric scrip codes and any ticker yfinance can't resolve — used for '% since buy'."""
+    t = str(ticker).strip().upper()
+    if not t or t.isdigit():                     # numeric = BSE scrip code, not yfinance-able
+        return None
+    df = _fetch_one_raw(t, years=1)
+    if df is None or df.empty or "Close" not in df.columns:
+        return None
+    try:
+        return float(df["Close"].iloc[-1])
+    except Exception:
+        return None
+
+
 @st.cache_data(show_spinner=False)
 def fetch_fund(ticker):
     return vs.fetch_fundamentals(ticker)
@@ -282,6 +298,21 @@ def fetch_superstar_bulkblock():
     bulk/block), written by the notebook → same-day large-trade feed that complements SAST (a
     different trigger, so it catches individual investors SAST's threshold-crossings miss)."""
     return _read_fii_tab("superstar_bulkblock_deals")
+
+
+@st.cache_data(show_spinner=False, ttl=21600)
+def fetch_superstar_insider():
+    """Insider (PIT) + SAST disclosures matched to superstars (report date · stock · person ·
+    Promoter/Other · Acquisition/Disposal · holding-after % · regulation), from the Trendlyne
+    per-investor insider page → the promoter/insider signal (complements bulk/block + SAST)."""
+    return _read_fii_tab("superstar_insider_deals")
+
+
+@st.cache_data(show_spinner=False, ttl=21600)
+def fetch_market_bulkblock():
+    """Market-wide (all-market) recent NSE bulk & block deals, written by the notebook →
+    the '📅 Today's deals' browser (not filtered to superstars)."""
+    return _read_fii_tab("market_bulkblock_deals")
 
 
 @st.cache_data(show_spinner="Loading holdings journey…", ttl=21600)
@@ -1764,6 +1795,39 @@ if _mode == "⭐ Superstars":
                        "Set **Min Sharpe** above its Sharpe, **Max DD ≥** above its drawdown, etc. Each investor "
                        "row also shows its own window-matched **Nifty Sharpe / Ann / Max DD** for a direct compare.")
 
+    # ---- 📅 market-wide bulk & block browser (all-market, not just superstars) ----
+    _mkt = fetch_market_bulkblock()
+    if not _mkt.empty and "symbol" in _mkt.columns:
+        _mkt = _mkt.copy()
+        _mkt["_dt"] = pd.to_datetime(_mkt["date"], format="mixed", dayfirst=True, errors="coerce")
+        _latest_d = _mkt["_dt"].max()
+        with st.expander(f"📅  Today's / recent bulk & block deals — market-wide  ·  {len(_mkt)} deals "
+                         f"(latest {_latest_d.date() if pd.notna(_latest_d) else '—'})"):
+            _mc1 = st.columns([3, 2, 2])
+            _mq = _mc1[0].text_input("🔎 Search stock / client", key="mkt_q").strip().lower()
+            _days = [str(pd.Timestamp(d).date()) for d in sorted(_mkt["_dt"].dropna().unique(), reverse=True)[:10]]
+            _mdt = _mc1[1].selectbox("Day", ["All"] + _days, key="mkt_day")
+            _mside = _mc1[2].multiselect("Side", ["BUY", "SELL"], key="mkt_side")
+            _mv = _mkt
+            if _mq:
+                _mv = _mv[_mv.apply(lambda r: _mq in str(r.get("symbol", "")).lower()
+                                    or _mq in str(r.get("company", "")).lower()
+                                    or _mq in str(r.get("client", "")).lower(), axis=1)]
+            if _mdt != "All":
+                _mv = _mv[_mv["_dt"].astype(str).str.startswith(_mdt)]
+            if _mside:
+                _mv = _mv[_mv["action"].astype(str).str.upper().isin(_mside)]
+            _mv = _mv.sort_values("_dt", ascending=False)
+            st.caption(f"Showing **{len(_mv)}** of {len(_mkt)} market-wide deals. Refreshed nightly by the notebook.")
+            st.dataframe(
+                _mv[[c for c in ["date", "symbol", "company", "client", "action", "qty", "price", "deal_type"]
+                     if c in _mv.columns]],
+                hide_index=True, use_container_width=True, height=360, column_config={
+                    "date": st.column_config.TextColumn("Date"), "symbol": st.column_config.TextColumn("Symbol"),
+                    "company": st.column_config.TextColumn("Stock"), "client": st.column_config.TextColumn("Client"),
+                    "action": st.column_config.TextColumn("Side"), "qty": st.column_config.TextColumn("Qty"),
+                    "price": st.column_config.TextColumn("Price ₹"), "deal_type": st.column_config.TextColumn("Type")})
+
     # ---- filters (combine with AND; numeric ones apply only when you enter a value) ----
     def _ncol(df, c):
         return pd.to_numeric(df[c], errors="coerce") if c in df.columns else pd.Series(float("nan"), index=df.index)
@@ -1873,75 +1937,147 @@ if _mode == "⭐ Superstars":
             if _u("interpretation"):
                 st.caption(_u("interpretation"))
 
-        # ---- this investor's SAST Reg-29 moves (near-real-time buy/sell; faster than quarterly) ----
+        # ==== 📊 Deals & performance zone (bulk/block · performance · SAST · insider) ====
+        _bb = fetch_superstar_bulkblock()
+        _bb = (_bb[_bb["investor"].astype(str).str.lower() == _pick.lower()]
+               if (not _bb.empty and "investor" in _bb.columns) else pd.DataFrame())
+        if not _bb.empty:
+            _bb = _bb.copy()
+            _bb["_dt"] = pd.to_datetime(_bb["date"], format="mixed", dayfirst=True, errors="coerce")
+            _bb["qtyN"] = pd.to_numeric(_bb.get("qty"), errors="coerce")
+            _bb["priceN"] = pd.to_numeric(_bb.get("price"), errors="coerce")
+            _bb["move"] = _bb["action"].astype(str).str.upper().map(
+                lambda a: "🟢 Buy" if a == "BUY" else ("🔴 Sell" if a == "SELL" else "—"))
         _isast = fetch_superstar_sast()
-        _mine = (_isast[_isast["investor"].astype(str).str.lower() == _pick.lower()]
+        _sast = (_isast[_isast["investor"].astype(str).str.lower() == _pick.lower()]
                  if (not _isast.empty and "investor" in _isast.columns) else pd.DataFrame())
-        if not _mine.empty and "confidence" in _mine.columns:
-            _mine = _mine[_mine["confidence"].astype(str).str.upper() != "REVIEW"]
-        st.markdown("#### 🔴 Recent NSE moves — **SAST Reg 29**  "
-                    "· crossed 5% / ±2% stake · filed ~T+2 (faster than the quarterly journey below)")
-        if _mine.empty:
-            st.caption(f"No recent Reg 29 disclosures for **{_pick.title()}** — they haven't crossed a 5% "
-                       "or ±2% stake threshold in the tracked window. Buy-and-hold names disclose rarely; "
-                       "their full quarterly holdings journey is below.")
-        else:
-            _mv = _mine.copy()
-            def _emo(a):
-                a = str(a).strip().lower()
-                return "🟢 Buy" if a.startswith("acq") else ("🔴 Sell" if a else "—")
-            if "action" in _mv.columns:
-                _mv["move"] = _mv["action"].map(_emo)
-            st.caption(f"**{len(_mv)}** disclosed threshold move(s) — the fast 'is this investor buying/selling now?' signal.")
-            _sc = [c for c in ["trade_dates", "symbol", "company", "move",
-                               "pct_traded", "pct_after", "reg_type"] if c in _mv.columns]
-            st.dataframe(
-                _mv[_sc], hide_index=True, use_container_width=True,
-                column_config={
+        if not _sast.empty and "confidence" in _sast.columns:
+            _sast = _sast[_sast["confidence"].astype(str).str.upper() != "REVIEW"]
+        _iins = fetch_superstar_insider()
+        _ins = (_iins[_iins["investor"].astype(str).str.lower() == _pick.lower()]
+                if (not _iins.empty and "investor" in _iins.columns) else pd.DataFrame())
+
+        st.markdown("### 📊 Deals & performance")
+        _tabR, _tabP, _tabA, _tabS, _tabI = st.tabs(
+            ["🕒 Recent (3M)", "📈 Performance", "📜 All deals", "🔴 SAST", "🕵️ Insider (1M)"])
+        _bbshow = ["date", "company", "entity", "exchange", "move", "qty", "price", "pct_traded", "deal_type"]
+        _bbcfg = {
+            "date": st.column_config.TextColumn("Date"), "company": st.column_config.TextColumn("Stock"),
+            "entity": st.column_config.TextColumn("Via (account/entity)"), "exchange": st.column_config.TextColumn("Exch"),
+            "move": st.column_config.TextColumn("Move"), "qty": st.column_config.TextColumn("Qty"),
+            "price": st.column_config.TextColumn("Avg price ₹"), "pct_traded": st.column_config.TextColumn("% traded"),
+            "deal_type": st.column_config.TextColumn("Type", help="Bulk = >0.5% of company in a day · Block = block-window trade")}
+
+        with _tabR:
+            if _bb.empty:
+                st.caption(f"No bulk/block deals on record for **{_pick.title()}**.")
+            else:
+                _r = _bb[_bb["_dt"] >= pd.Timestamp.now() - pd.Timedelta(days=90)].sort_values("_dt", ascending=False)
+                st.caption(f"**{len(_r)}** bulk/block trade(s) in the last 3 months — BSE + NSE, all entities.")
+                st.dataframe(_r[[c for c in _bbshow if c in _r.columns]], hide_index=True,
+                             use_container_width=True, column_config=_bbcfg)
+
+        with _tabP:
+            if _bb.empty:
+                st.caption("No bulk/block deals to analyse.")
+            else:
+                st.markdown("**% move since each buy** — did it rise after they bought? "
+                            "_(now vs the deal's avg price · buys in the last 12 months)_")
+                _buys = _bb[(_bb["move"] == "🟢 Buy") &
+                            (_bb["_dt"] >= pd.Timestamp.now() - pd.Timedelta(days=365))].copy()
+                if _buys.empty:
+                    st.caption("No buys in the last 12 months.")
+                else:
+                    _px = {t: _cur_price(t) for t in _buys["ticker"].dropna().unique()}
+                    _buys["current"] = _buys["ticker"].map(_px)
+                    _buys["pct_since"] = ((_buys["current"] - _buys["priceN"]) / _buys["priceN"] * 100).round(1)
+                    _buys["days"] = (pd.Timestamp.now().normalize() - _buys["_dt"]).dt.days
+                    _pv = _buys.sort_values("_dt", ascending=False)[
+                        [c for c in ["date", "company", "ticker", "priceN", "current", "pct_since", "days", "exchange"]
+                         if c in _buys.columns]]
+                    st.dataframe(_pv, hide_index=True, use_container_width=True, column_config={
+                        "date": st.column_config.TextColumn("Bought"), "company": st.column_config.TextColumn("Stock"),
+                        "ticker": st.column_config.TextColumn("Ticker"),
+                        "priceN": st.column_config.NumberColumn("Buy ₹", format="%.1f"),
+                        "current": st.column_config.NumberColumn("Now ₹", format="%.1f"),
+                        "pct_since": st.column_config.NumberColumn("% since", format="%.1f%%"),
+                        "days": st.column_config.NumberColumn("Days"), "exchange": st.column_config.TextColumn("Exch")})
+                    st.caption("Blank Now/% = BSE-only scrip code or price unavailable. Prices ~1-day cached.")
+                st.markdown("**Realized round-trips** — bought *and later* sold "
+                            "_(same-day/price inter-entity transfers excluded; both legs must be disclosed)_")
+                _rt = []
+                for _tk, _g in _bb.dropna(subset=["_dt", "qtyN", "priceN"]).groupby("ticker"):
+                    _key = (_g["_dt"].astype(str) + "|" + _g["priceN"].astype(str) + "|" + _g["qtyN"].astype(str))
+                    _xfer = set(_key[_g["move"] == "🟢 Buy"]) & set(_key[_g["move"] == "🔴 Sell"])
+                    _real = _g[~_key.isin(_xfer)]
+                    _b = _real[_real["move"] == "🟢 Buy"]; _s = _real[_real["move"] == "🔴 Sell"]
+                    _bq, _sq = _b["qtyN"].sum(), _s["qtyN"].sum()
+                    if not (_bq > 0 and _sq > 0):
+                        continue
+                    _ab = (_b["qtyN"] * _b["priceN"]).sum() / _bq
+                    _as = (_s["qtyN"] * _s["priceN"]).sum() / _sq
+                    _rt.append({"company": _g["company"].iloc[0], "ticker": _tk,
+                                "avg_buy": round(_ab, 1), "avg_sell": round(_as, 1),
+                                "realized_pct": round((_as - _ab) / _ab * 100, 1) if _ab else None,
+                                "days": (_s["_dt"].max() - _b["_dt"].min()).days})
+                if _rt:
+                    st.dataframe(pd.DataFrame(_rt).sort_values("realized_pct", ascending=False),
+                                 hide_index=True, use_container_width=True, column_config={
+                        "company": st.column_config.TextColumn("Stock"), "ticker": st.column_config.TextColumn("Ticker"),
+                        "avg_buy": st.column_config.NumberColumn("Avg buy ₹", format="%.1f"),
+                        "avg_sell": st.column_config.NumberColumn("Avg sell ₹", format="%.1f"),
+                        "realized_pct": st.column_config.NumberColumn("Realized %", format="%.1f%%"),
+                        "days": st.column_config.NumberColumn("Hold days")})
+                else:
+                    st.caption("No clean disclosed round-trips — bulk/block usually shows only one side "
+                               "(the other leg is accumulated/exited quietly below the threshold).")
+
+        with _tabA:
+            if _bb.empty:
+                st.caption("No bulk/block deals on record.")
+            else:
+                _a = _bb.sort_values("_dt", ascending=False)
+                st.caption(f"**{len(_a)}** total disclosed bulk/block trades · **Via** = the actual account/entity.")
+                st.dataframe(_a[[c for c in _bbshow if c in _a.columns]], hide_index=True,
+                             use_container_width=True, column_config=_bbcfg)
+
+        with _tabS:
+            st.caption("SEBI **SAST Reg 29** — crossed 5% (Reg29(1)) or moved ±2% (Reg29(2)); filed ~T+2.")
+            if _sast.empty:
+                st.caption(f"No SAST Reg 29 disclosures for **{_pick.title()}** in the tracked window.")
+            else:
+                _sv = _sast.copy()
+                _sv["move"] = _sv["action"].astype(str).str.lower().map(
+                    lambda a: "🟢 Buy" if a.startswith("acq") else ("🔴 Sell" if a else "—"))
+                _sc = [c for c in ["trade_dates", "symbol", "company", "move", "pct_traded", "pct_after", "reg_type"]
+                       if c in _sv.columns]
+                st.dataframe(_sv[_sc], hide_index=True, use_container_width=True, column_config={
                     "trade_dates": st.column_config.TextColumn("Trade date(s)"),
-                    "symbol": st.column_config.TextColumn("NSE symbol"),
-                    "company": st.column_config.TextColumn("Company"),
+                    "symbol": st.column_config.TextColumn("NSE symbol"), "company": st.column_config.TextColumn("Company"),
                     "move": st.column_config.TextColumn("Move"),
                     "pct_traded": st.column_config.NumberColumn("Δ stake %", format="%.2f"),
                     "pct_after": st.column_config.NumberColumn("Stake after %", format="%.2f"),
-                    "reg_type": st.column_config.TextColumn("Reg", help="Reg29(1)=crossed 5% · Reg29(2)=±2% move"),
-                })
+                    "reg_type": st.column_config.TextColumn("Reg")})
 
-        # ---- this investor's bulk/block deals (same-day large trades; complements SAST) ----
-        _ibb = fetch_superstar_bulkblock()
-        _bb = (_ibb[_ibb["investor"].astype(str).str.lower() == _pick.lower()]
-               if (not _ibb.empty and "investor" in _ibb.columns) else pd.DataFrame())
-        if not _bb.empty and "confidence" in _bb.columns:
-            _bb = _bb[_bb["confidence"].astype(str).str.upper() != "REVIEW"]
-        st.markdown("#### 📈 Bulk & block deals — same-day large trades (NSE · complements SAST above)")
-        if _bb.empty:
-            st.caption(f"No bulk/block deals for **{_pick.title()}** in the tracked window — they trade "
-                       "below the 0.5%-of-company-in-a-day bulk threshold.")
-        else:
-            _bbv = _bb.copy()
-            def _bemo(a):
-                a = str(a).strip().upper()
-                return "🟢 Buy" if a == "BUY" else ("🔴 Sell" if a == "SELL" else "—")
-            if "action" in _bbv.columns:
-                _bbv["move"] = _bbv["action"].map(_bemo)
-            st.caption(f"**{len(_bbv)}** large single-day trade(s) — catches moves SAST's 5%/±2% thresholds miss. "
-                       "**Via** shows the actual account/entity (AIF, family member, associate co); covers BSE + NSE.")
-            _bc2 = [c for c in ["date", "company", "entity", "exchange", "move", "qty", "price",
-                                "pct_traded", "deal_type"] if c in _bbv.columns]
-            st.dataframe(
-                _bbv[_bc2], hide_index=True, use_container_width=True,
-                column_config={
-                    "date": st.column_config.TextColumn("Date"),
-                    "company": st.column_config.TextColumn("Stock"),
-                    "entity": st.column_config.TextColumn("Via (account/entity)"),
-                    "exchange": st.column_config.TextColumn("Exch"),
-                    "move": st.column_config.TextColumn("Move"),
-                    "qty": st.column_config.TextColumn("Qty"),
-                    "price": st.column_config.TextColumn("Avg price ₹"),
-                    "pct_traded": st.column_config.TextColumn("% traded"),
-                    "deal_type": st.column_config.TextColumn("Type",
-                        help="Bulk = >0.5% of company in a day · Block = block-window trade"),
-                })
+        with _tabI:
+            st.caption("Insider (PIT) + SAST — promoter / designated-person trades, clustered across entities.")
+            if _ins.empty:
+                st.caption(f"No insider/SAST disclosures on record for **{_pick.title()}**.")
+            else:
+                _iv = _ins.copy()
+                _iv["_rd"] = pd.to_datetime(_iv.get("report_date"), format="mixed", dayfirst=True, errors="coerce")
+                _all_i = st.checkbox("Show all (not just last 30 days)", value=False, key=f"ins_all_{_pick}")
+                if not _all_i:
+                    _iv = _iv[_iv["_rd"] >= pd.Timestamp.now() - pd.Timedelta(days=30)]
+                _iv = _iv.sort_values("_rd", ascending=False)
+                st.caption(f"**{len(_iv)}** disclosure(s){'' if _all_i else ' in the last 30 days'}.")
+                _ic = [c for c in ["report_date", "company", "person", "category", "action",
+                                   "holding_after", "traded_pct", "regulation"] if c in _iv.columns]
+                st.dataframe(_iv[_ic], hide_index=True, use_container_width=True, column_config={
+                    "report_date": st.column_config.TextColumn("Reported"), "company": st.column_config.TextColumn("Stock"),
+                    "person": st.column_config.TextColumn("Person / entity"), "category": st.column_config.TextColumn("Type"),
+                    "action": st.column_config.TextColumn("Action"), "holding_after": st.column_config.TextColumn("Holding after"),
+                    "traded_pct": st.column_config.TextColumn("Traded %"), "regulation": st.column_config.TextColumn("Reg")})
 
         _link = _u("links") or _u("portfolio_url")
         _hold, _quarters, _err = superstar_holdings_journey(_pick)
