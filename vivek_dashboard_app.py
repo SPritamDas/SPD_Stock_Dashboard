@@ -1585,14 +1585,18 @@ if _mode == "💡 Allocate ₹":
         st.warning("No data yet — run the notebook (superstar feeds) and build the price cache from **📊 Stocks**.")
         st.stop()
 
-    _c = st.columns([2, 2, 2, 3])
+    _c = st.columns([2, 2, 2, 3, 3])
     _budget = _c[0].number_input("Budget ₹", value=50000, min_value=1000, step=5000)
     _profile = _c[1].selectbox("Risk profile", ["Balanced", "Conservative", "Aggressive"],
                                help="Balanced ~8 · Conservative liquid/diversified ~12 · Aggressive concentrated ~5")
     _n = _c[2].number_input("How many stocks",
                             value={"Balanced": 8, "Conservative": 12, "Aggressive": 5}[_profile],
                             min_value=3, max_value=20, step=1)
-    _need_setup = _c[3].checkbox("Only names with a live strategy setup", value=False,
+    _univ = _c[3].selectbox("Universe", ["All superstar-held", "V-universe only"],
+                            help="All = every stock the quality gurus hold (wider; non-V names ride on the "
+                                 "superstar signal alone, no fundamental/strategy vetting). V-universe only = "
+                                 "restrict to your vetted V40 / V40-N / V200 names.")
+    _need_setup = _c[4].checkbox("Only names with a live strategy setup", value=False,
                                  help="On → every pick has a defined entry/target/expected-profit from your backtests.")
 
     # ---- build the candidate universe: superstar stocks ∪ live-setup stocks ----
@@ -1614,6 +1618,8 @@ if _mode == "💡 Allocate ₹":
     base["company"] = base["company"].fillna("").replace("", pd.NA).fillna(base["ticker"])
     base["vbonus"] = base["ticker"].map(_vtier).fillna(0)
     base["vclass"] = base["ticker"].map(_vlabel).fillna("")
+    if str(_univ).startswith("V"):                          # restrict to the vetted V-universe if chosen
+        base = base[base["vbonus"] > 0]
     _ev = pd.to_numeric(base.get("setup_ev"), errors="coerce").fillna(0) if "setup_ev" in base.columns else pd.Series(0, index=base.index)
     base["setup_bonus"] = (_ev / (_ev.max() or 1) * 22) + (base.get("setup", pd.Series("", index=base.index))
                                                             .astype(str).str.contains("READY").astype(float) * 6)
