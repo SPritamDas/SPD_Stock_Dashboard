@@ -1653,37 +1653,56 @@ if _mode == "💡 Allocate ₹":
 
     def _why(r):
         bits = []
+        _su = str(r.get("setup", "") or "").strip()
+        if _su and _su.lower() != "nan":
+            _stg = str(r.get("strategy", "") or "").strip()
+            _t = f"{_su} — {_stg} strategy" if _stg else _su
+            _ep, _sr = r.get("exp_profit"), r.get("success")
+            if pd.notna(_ep) and pd.notna(_sr):
+                _t += f" (target +{_ep:.0f}% · {_sr:.0f}% win-rate)"
+            elif pd.notna(_ep):
+                _t += f" (target +{_ep:.0f}%)"
+            bits.append(_t)
+        else:
+            bits.append("no live strategy setup — quality/superstar signal only")
+        if isinstance(r.get("vclass"), str) and r["vclass"]:
+            bits.append(f"{r['vclass']} class")
         if r.get("n_holders", 0) >= 1:
-            b0 = f"{int(r['n_holders'])} gurus"
+            _g = f"{int(r['n_holders'])} quality gurus"
             if isinstance(r.get("held_by"), str) and r["held_by"].strip():
-                b0 += " (e.g. " + ", ".join([x.strip() for x in str(r["held_by"]).split(",")[:2]]) + ")"
-            bits.append(b0)
+                _g += " (" + ", ".join([x.strip() for x in str(r["held_by"]).split(",")[:2]]) + ")"
+            bits.append(_g)
         if isinstance(r.get("recent_action"), str) and r["recent_action"].strip():
             bits.append(r["recent_action"])
         ru = r.get("runup_pct")
         if pd.notna(ru):
             bits.append(f"{'+' if ru >= 0 else ''}{ru:.0f}% since {str(r.get('last_buy_by', 'guru')).title()}'s buy")
-        if isinstance(r.get("setup"), str) and r["setup"].strip():
-            bits.append(f"{r['setup']} {r.get('strategy','')} · exp +{r.get('exp_profit',0):.0f}% @ {r.get('success',0):.0f}%")
-        return " · ".join(bits) or "in your V-universe"
+        return " · ".join(bits)
     _top["why"] = _top.apply(_why, axis=1)
 
     st.markdown(f"### 📋 {_profile} plan for ₹{_budget:,.0f} — {len(_top)} stocks · "
                 f"₹{_dep:,.0f} deployed · ₹{_left:,.0f} cash left (rounding)")
+    st.caption("👇 **Click any row** to open that stock in **📊 Stock Analysis** (chart · backtest · fundamentals).")
     _cols = [c for c in ["company", "ticker", "vclass", "price", "invest_inr", "shares", "weight_pct",
-                         "setup", "exp_profit", "success", "score", "why"] if c in _top.columns]
-    st.dataframe(_top[_cols], hide_index=True, use_container_width=True, column_config={
+                         "strategy", "setup", "exp_profit", "success", "score", "why"] if c in _top.columns]
+    _al_ev = st.dataframe(_top[_cols], hide_index=True, use_container_width=True,
+                          on_select="rerun", selection_mode="single-row", key="alloc_tbl", column_config={
         "company": st.column_config.TextColumn("Stock"), "ticker": st.column_config.TextColumn("Ticker"),
         "vclass": st.column_config.TextColumn("Class"),
         "price": st.column_config.NumberColumn("Price ₹", format="%.1f"),
         "invest_inr": st.column_config.NumberColumn("Invest ₹", format="%.0f"),
         "shares": st.column_config.NumberColumn("Shares"),
         "weight_pct": st.column_config.NumberColumn("Weight", format="%.1f%%"),
+        "strategy": st.column_config.TextColumn("Strategy", help="The backtested strategy with a live setup on this name (blank = none)."),
         "setup": st.column_config.TextColumn("Setup"),
         "exp_profit": st.column_config.NumberColumn("Exp +%", format="%.0f"),
         "success": st.column_config.NumberColumn("Win %", format="%.0f"),
         "score": st.column_config.NumberColumn("Score", format="%.0f"),
         "why": st.column_config.TextColumn("Why", width="large")})
+    _al_sel = _al_ev.selection["rows"] if _al_ev and getattr(_al_ev, "selection", None) else []
+    if _al_sel and _al_sel[0] < len(_top):
+        _open_stock(str(_top.iloc[_al_sel[0]]["ticker"]), "💡 Allocate ₹")
+        st.rerun()
     st.caption("**Score** = superstar conviction (quality-weighted consensus + recent buying) + **V-class** "
                "(V40>V40-N>V200) + **live setup** (expected profit × success, READY>REVIEW) + **entry** "
                "(penalises run-ups since the gurus' buys). Weights ∝ score, capped 25%/stock, whole shares "
