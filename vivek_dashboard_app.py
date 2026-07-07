@@ -1600,6 +1600,9 @@ if _mode == "💡 Allocate ₹":
                                  "restrict to your vetted V40 / V40-N / V200 names.")
     _need_setup = _c[4].checkbox("Only names with a live strategy setup", value=False,
                                  help="On → every pick has a defined entry/target/expected-profit from your backtests.")
+    _value_only = st.checkbox("💎 Only \'earnings-up, price-down\' setups (the Singhania / Kela value pattern)", value=False,
+                              help="Keep only names whose revenue & profit are rising while the price has FALLEN over ~6 months — "
+                                   "fundamentally improving but out of favour (what the pro individual gurus quietly accumulate).")
 
     # ---- build the candidate universe: superstar stocks ∪ live-setup stocks ----
     if not _sc.empty:
@@ -1643,13 +1646,52 @@ if _mode == "💡 Allocate ₹":
     if base.empty:
         st.info("No priced candidates (many small/BSE-only names lack an NSE quote)."); st.stop()
 
+    # --- value signal: revenue & profit rising while price is down (~6mo) — the guru accumulation pattern ---
+    def _fund_for(t):
+        _cf = (cache or {}).get("fund", {}).get(t)          # V-universe fundamentals are pre-cached (free)
+        if _cf:
+            return _cf
+        try:
+            return fetch_fund(t) or {}
+        except Exception:
+            return {}
+    def _mom6(t):
+        _df = (cache or {}).get("data", {}).get(t)          # reuse cached price history when available
+        if _df is None or "Close" not in getattr(_df, "columns", []):
+            try:
+                _df = fetch_one(t, 1)
+            except Exception:
+                _df = None
+        if _df is None or "Close" not in getattr(_df, "columns", []):
+            return None
+        _cc = _df["Close"].dropna()
+        if len(_cc) < 40:
+            return None
+        _k = 126 if len(_cc) >= 126 else len(_cc) - 1       # ~6 trading months
+        return (float(_cc.iloc[-1]) / float(_cc.iloc[-_k]) - 1) * 100
+    with st.spinner("Scanning fundamentals vs price (value setups)…"):
+        _vmap = {}
+        for _t in base["ticker"]:
+            _fd = _fund_for(_t); _m6 = _mom6(_t)
+            _rev_up = ((_fd.get("sales_growth_pct") or 0) > 0) or bool(_fd.get("ttm_revenue_is_highest"))
+            _pft_up = ((_fd.get("profit_growth_pct") or 0) > 0) or bool(_fd.get("ttm_netprofit_is_highest"))
+            _vmap[_t] = (bool(_rev_up and _pft_up and _m6 is not None and _m6 < 0), _m6)
+    base["mom6"] = base["ticker"].map(lambda t: _vmap.get(t, (False, None))[1])
+    base["value_setup"] = base["ticker"].map(lambda t: _vmap.get(t, (False, None))[0])
+    base["value_bonus"] = base["value_setup"].astype(float) * 14.0
+    if _value_only:
+        base = base[base["value_setup"]].copy()
+        if base.empty:
+            st.info("No 'earnings-up, price-down' setups among the candidates right now — loosen the filters."); st.stop()
+
     _lbp = pd.to_numeric(base.get("last_buy_price"), errors="coerce") if "last_buy_price" in base.columns else pd.Series(pd.NA, index=base.index)
     base["runup_pct"] = [((p - b) / b * 100) if (pd.notna(b) and b) else None for p, b in zip(base["price"], _lbp)]
     _pen = {"Conservative": 2.0, "Balanced": 1.0, "Aggressive": 0.6}[_profile]
     base["entry_score"] = [12.0 if ru is None or pd.isna(ru) else float(max(0, 20 - max(0, ru) * 0.2 * _pen))
                            for ru in base["runup_pct"]]
     _fmult = {"Aggressive": 1.6, "Balanced": 1.0, "Conservative": 0.8}[_profile]
-    base["score"] = base["consensus"] + base["flow"] * _fmult + base["vbonus"] + base["setup_bonus"] + base["entry_score"]
+    base["score"] = (base["consensus"] + base["flow"] * _fmult + base["vbonus"] + base["setup_bonus"]
+                     + base["entry_score"] + base["value_bonus"])
     _top = base.sort_values("score", ascending=False).head(int(_n)).copy()
 
     _w = _top["score"].clip(lower=0.1); _w = _w / _w.sum(); _w = _w.clip(upper=0.25); _w = _w / _w.sum()
@@ -1780,6 +1822,11 @@ if _mode == "💡 Allocate ₹":
                     _fstr = " · ".join(_fb) + ((" · " + ", ".join(_fl)) if _fl else "")
                     if _fstr.strip(" ·"):
                         st.markdown(f"**📊 Fundamentals:** {_fstr}")
+                if r.get("value_setup"):
+                    _m6r = r.get("mom6")
+                    _m6s = f"{_m6r:.0f}% over ~6 months" if isinstance(_m6r, (int, float)) and pd.notna(_m6r) else "down"
+                    st.markdown(f"**💎 Value setup:** revenue & profit rising but price **{_m6s}** — earnings up, "
+                                "price down (the pattern the pro gurus quietly accumulate).")
                 # watch-outs
                 _w = []
                 if pd.notna(_ru) and _ru > 40:
