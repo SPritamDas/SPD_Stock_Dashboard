@@ -977,7 +977,10 @@ _FLOAT_CALC_HTML = r"""
     if (typeof S.value === 'string') disp.value = S.value;
     if (S.left != null && S.top != null) {
       wrap.style.right = 'auto'; wrap.style.bottom = 'auto';
-      wrap.style.left = S.left + 'px'; wrap.style.top = S.top + 'px';
+      var _cl = Math.max(0, Math.min(S.left, W.innerWidth - 60));
+      var _ct = Math.max(54, Math.min(S.top, W.innerHeight - 40));   // keep the header on-screen (min/close reachable)
+      wrap.style.left = _cl + 'px'; wrap.style.top = _ct + 'px';
+      S.left = _cl; S.top = _ct;
     }
     if (S.min) wrap.classList.add('min');
     if (S.closed) { wrap.style.display = 'none'; reopen.style.display = 'block'; }
