@@ -1549,9 +1549,8 @@ render_floating_notes()        # 📒 draggable, always-on-top notes (context-aw
 # ============================================================================
 if _mode == "💡 Allocate ₹":
     st.markdown("## 💡 Suggest & allocate — best names for your budget (superstars × your strategies)")
-    st.caption("Blends **quality-superstar conviction** (only BUY/STRONG BUY · Sharpe≥0.4 · MaxDD≥-40, alpha-weighted) (who's buying) · your **V-class quality tier** (V40 / V40-N / "
-               "V200) · **live strategy setups** (READY/REVIEW with expected profit & success from your "
-               "backtests) + live prices. **Not investment advice** — a ranked screen; verify before buying.")
+    st.caption("Ranks stocks by **quality-guru conviction** (BUY/STRONG-BUY · Sharpe ≥ 0.4 · Max DD ≥ −40, "
+               "alpha-weighted) × **V-class** × **live strategy setup** × entry.  **Not advice — verify before buying.**")
     _sc = superstar_stock_scores()
 
     # ---- strategy layer: best live setup per ticker (V-universe backtest engine) ----
@@ -1688,11 +1687,9 @@ if _mode == "💡 Allocate ₹":
 
     st.markdown(f"### 📋 {_profile} plan for ₹{_budget:,.0f} — {len(_top)} stocks · "
                 f"₹{_dep:,.0f} deployed · ₹{_left:,.0f} cash left (rounding)")
-    st.caption("👇 **Click any row** to open that stock in **📊 Stock Analysis** (chart · backtest · fundamentals).")
     _cols = [c for c in ["company", "ticker", "vclass", "price", "invest_inr", "shares", "weight_pct",
                          "strategy", "setup", "exp_profit", "success", "score", "why"] if c in _top.columns]
-    _al_ev = st.dataframe(_top[_cols], hide_index=True, use_container_width=True,
-                          on_select="rerun", selection_mode="single-row", key="alloc_tbl", column_config={
+    st.dataframe(_top[_cols], hide_index=True, use_container_width=True, column_config={
         "company": st.column_config.TextColumn("Stock"), "ticker": st.column_config.TextColumn("Ticker"),
         "vclass": st.column_config.TextColumn("Class"),
         "price": st.column_config.NumberColumn("Price ₹", format="%.1f"),
@@ -1705,10 +1702,15 @@ if _mode == "💡 Allocate ₹":
         "success": st.column_config.NumberColumn("Win %", format="%.0f"),
         "score": st.column_config.NumberColumn("Score", format="%.0f"),
         "why": st.column_config.TextColumn("Why", width="large")})
-    _al_sel = _al_ev.selection["rows"] if _al_ev and getattr(_al_ev, "selection", None) else []
-    if _al_sel and _al_sel[0] < len(_top):
-        _open_stock(str(_top.iloc[_al_sel[0]]["ticker"]), "💡 Allocate ₹")
-        st.rerun()
+    # open any pick in Stock Analysis (button on_click sets the mode BEFORE widgets instantiate — safe)
+    _oc = st.columns([4, 2])
+    _opts = ["—"] + [f"{r['ticker']} · {r['company']}" for _, r in _top.iterrows()]
+    _pick_open = _oc[0].selectbox("Open a pick in 📊 Stock Analysis (chart · backtest · fundamentals)",
+                                  _opts, key="alloc_open_pick")
+    _oc[1].markdown("<div style='height:1.8em'></div>", unsafe_allow_html=True)
+    _oc[1].button("📈 Open", use_container_width=True, disabled=(_pick_open == "—"),
+                  on_click=_open_stock,
+                  args=((_pick_open.split(" · ")[0] if _pick_open != "—" else ""), "💡 Allocate ₹"))
     st.caption("**Score** = superstar conviction (quality-weighted consensus + recent buying) + **V-class** "
                "(V40>V40-N>V200) + **live setup** (expected profit × success, READY>REVIEW) + **entry** "
                "(penalises run-ups since the gurus' buys). Weights ∝ score, capped 25%/stock, whole shares "
