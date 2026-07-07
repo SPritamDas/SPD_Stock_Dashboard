@@ -276,6 +276,14 @@ def fetch_superstar_sast():
     return _read_fii_tab("superstar_sast_deals")
 
 
+@st.cache_data(show_spinner=False, ttl=21600)
+def fetch_superstar_bulkblock():
+    """NSE bulk & block deals matched to superstars (investor · stock · buy/sell · qty · price ·
+    bulk/block), written by the notebook → same-day large-trade feed that complements SAST (a
+    different trigger, so it catches individual investors SAST's threshold-crossings miss)."""
+    return _read_fii_tab("superstar_bulkblock_deals")
+
+
 @st.cache_data(show_spinner="Loading holdings journey…", ttl=21600)
 def _fetch_holdings_tab():
     """Full per-investor HOLDINGS JOURNEY (investor · ticker · company · move · delta · value · qty +
@@ -1897,6 +1905,38 @@ if _mode == "⭐ Superstars":
                     "pct_traded": st.column_config.NumberColumn("Δ stake %", format="%.2f"),
                     "pct_after": st.column_config.NumberColumn("Stake after %", format="%.2f"),
                     "reg_type": st.column_config.TextColumn("Reg", help="Reg29(1)=crossed 5% · Reg29(2)=±2% move"),
+                })
+
+        # ---- this investor's bulk/block deals (same-day large trades; complements SAST) ----
+        _ibb = fetch_superstar_bulkblock()
+        _bb = (_ibb[_ibb["investor"].astype(str).str.lower() == _pick.lower()]
+               if (not _ibb.empty and "investor" in _ibb.columns) else pd.DataFrame())
+        if not _bb.empty and "confidence" in _bb.columns:
+            _bb = _bb[_bb["confidence"].astype(str).str.upper() != "REVIEW"]
+        st.markdown("#### 📈 Bulk & block deals — same-day large trades (NSE · complements SAST above)")
+        if _bb.empty:
+            st.caption(f"No bulk/block deals for **{_pick.title()}** in the tracked window — they trade "
+                       "below the 0.5%-of-company-in-a-day bulk threshold.")
+        else:
+            _bbv = _bb.copy()
+            def _bemo(a):
+                a = str(a).strip().upper()
+                return "🟢 Buy" if a == "BUY" else ("🔴 Sell" if a == "SELL" else "—")
+            if "action" in _bbv.columns:
+                _bbv["move"] = _bbv["action"].map(_bemo)
+            st.caption(f"**{len(_bbv)}** large single-day trade(s) — catches moves SAST's 5%/±2% thresholds miss.")
+            _bc2 = [c for c in ["date", "symbol", "company", "move", "qty", "price", "deal_type"] if c in _bbv.columns]
+            st.dataframe(
+                _bbv[_bc2], hide_index=True, use_container_width=True,
+                column_config={
+                    "date": st.column_config.TextColumn("Date"),
+                    "symbol": st.column_config.TextColumn("NSE symbol"),
+                    "company": st.column_config.TextColumn("Company"),
+                    "move": st.column_config.TextColumn("Move"),
+                    "qty": st.column_config.TextColumn("Qty"),
+                    "price": st.column_config.TextColumn("Price ₹"),
+                    "deal_type": st.column_config.TextColumn("Type",
+                        help="bulk = >0.5% of company in a day · block = block-window trade"),
                 })
 
         _link = _u("links") or _u("portfolio_url")
