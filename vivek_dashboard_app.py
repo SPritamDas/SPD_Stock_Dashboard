@@ -1705,10 +1705,106 @@ if _mode == "💡 Allocate ₹":
         "success": st.column_config.NumberColumn("Win %", format="%.0f"),
         "score": st.column_config.NumberColumn("Score", format="%.0f"),
         "why": st.column_config.TextColumn("Why", width="large")})
-    with st.expander("💬  Why these picks — full reasoning", expanded=True):
-        for _, _r in _top.iterrows():
-            _cl = f" · {_r['vclass']}" if isinstance(_r.get("vclass"), str) and _r["vclass"] else ""
-            st.markdown(f"- **{_r.get('company','')}**  ({_r.get('ticker','')}{_cl}) — {_r.get('why','')}")
+    # ---- detailed per-pick briefing: holders · who added/trimmed · fundamentals · watch-outs ----
+    _sd = fetch_superstar_summary().reset_index(drop=True)
+    _qm = {}                                            # qualifying investor -> (signal, alpha)
+    if not _sd.empty and "name" in _sd.columns:
+        _shq = pd.to_numeric(_sd.get("sharpe_ratio"), errors="coerce")
+        _ddq = pd.to_numeric(_sd.get("max_drawdown_pct"), errors="coerce")
+        _alq = pd.to_numeric(_sd.get("alpha_ann_pct"), errors="coerce")
+        for _i in range(len(_sd)):
+            if (_sd.loc[_i, "signal"] in ("STRONG BUY", "BUY")
+                    and pd.notna(_shq[_i]) and _shq[_i] >= 0.4 and pd.notna(_ddq[_i]) and _ddq[_i] >= -40):
+                _qm[str(_sd.loc[_i, "name"]).strip().lower()] = (_sd.loc[_i, "signal"], _alq[_i])
+    _mv_all = fetch_superstar_moves()
+    if not _mv_all.empty and "ticker" in _mv_all.columns:
+        _mv_all = _mv_all.copy(); _mv_all["ticker"] = _mv_all["ticker"].astype(str)
+    else:
+        _mv_all = pd.DataFrame(columns=["ticker", "investor", "move", "delta"])
+
+    st.markdown("### 💬 Why these picks — full briefing (click to expand)")
+    with st.spinner("Building briefings (holders · fundamentals)…"):
+        for _, r in _top.iterrows():
+            _tk = str(r["ticker"]); _cl = f" · {r['vclass']}" if isinstance(r.get("vclass"), str) and r["vclass"] else ""
+            _su = str(r.get("setup", "") or "").strip()
+            _hdr = (f"{r.get('company', _tk)}  ({_tk}{_cl})  ·  ₹{r.get('invest_inr', 0):,.0f} · "
+                    f"{int(r.get('shares', 0))} sh · {r.get('weight_pct', 0):.1f}%  ·  "
+                    f"{_su if _su and _su.lower() != 'nan' else 'no setup'}  ·  score {r.get('score', 0):.0f}")
+            with st.expander(_hdr):
+                # strategy
+                if _su and _su.lower() != "nan":
+                    _l = f"**📈 Strategy — {r.get('strategy','')}**: {_su}"
+                    if pd.notna(r.get("exp_profit")) and pd.notna(r.get("success")):
+                        _l += f" · target **+{r.get('exp_profit'):.0f}%** at **{r.get('success'):.0f}%** win-rate"
+                    st.markdown(_l)
+                else:
+                    st.markdown("**📈 Strategy**: no live setup — on the superstar/quality signal only.")
+                # who holds / added / trimmed (qualifying gurus only)
+                _mt = _mv_all[_mv_all["ticker"] == _tk] if "ticker" in _mv_all.columns else _mv_all.iloc[0:0]
+                _adds, _trims = [], []
+                for _, m in _mt.iterrows():
+                    _inv = str(m.get("investor", "")).strip().lower()
+                    if _inv not in _qm:
+                        continue
+                    _d = pd.to_numeric(m.get("delta"), errors="coerce")
+                    _tag = str(m.get("investor", "")).title() + (f" ({'+' if pd.notna(_d) and _d >= 0 else ''}{_d:.1f}%)" if pd.notna(_d) else "")
+                    (_adds if str(m.get("move", "")).upper() in ("NEW", "ADD") else _trims).append((_qm[_inv][1], _tag)) \
+                        if str(m.get("move", "")).upper() in ("NEW", "ADD", "TRIM", "EXIT") else None
+                st.markdown(f"**⭐ Quality gurus holding: {int(r.get('n_holders', 0))}**")
+                if _adds:
+                    st.markdown("- 🟢 **Adding / new:** " + ", ".join(t for _, t in sorted(_adds, reverse=True)))
+                if _trims:
+                    st.markdown("- 🔴 **Trimming / exiting:** " + ", ".join(t for _, t in sorted(_trims, reverse=True)))
+                if not _adds and not _trims and isinstance(r.get("held_by"), str) and r["held_by"].strip():
+                    st.markdown(f"- holding steady: {r['held_by']}")
+                _ru = r.get("runup_pct")
+                if pd.notna(_ru):
+                    st.markdown(f"- price is **{'+' if _ru >= 0 else ''}{_ru:.0f}%** vs the gurus' recent buy")
+                # fundamentals (best-effort)
+                try:
+                    _fd = fetch_fund(_tk) or {}
+                except Exception:
+                    _fd = {}
+                if _fd:
+                    _fb = []
+                    for _k, _lab, _sfx in [("pe_trailing", "P/E", ""), ("roe_pct", "ROE", "%"),
+                                           ("debt_to_equity", "D/E", ""), ("sales_growth_pct", "Rev gr", "%"),
+                                           ("profit_growth_pct", "Profit gr", "%")]:
+                        _v = _fd.get(_k)
+                        if isinstance(_v, (int, float)) and pd.notna(_v):
+                            _fb.append(f"{_lab} {_v:.1f}{_sfx}")
+                    _fl = []
+                    if _fd.get("ttm_revenue_is_highest"): _fl.append("revenue at all-time high")
+                    if _fd.get("ttm_netprofit_is_highest"): _fl.append("profit at all-time high")
+                    if _fd.get("good_track_record"): _fl.append("consistent profit growth")
+                    _fstr = " · ".join(_fb) + ((" · " + ", ".join(_fl)) if _fl else "")
+                    if _fstr.strip(" ·"):
+                        st.markdown(f"**📊 Fundamentals:** {_fstr}")
+                # watch-outs
+                _w = []
+                if pd.notna(_ru) and _ru > 40:
+                    _w.append(f"already up {_ru:.0f}% since the gurus bought — entry less attractive")
+                if _trims and len(_trims) >= len(_adds):
+                    _w.append("as many quality gurus trimming as adding")
+                if _su and pd.notna(r.get("success")) and r.get("success") < 40:
+                    _w.append(f"low backtest win-rate ({r.get('success'):.0f}%)")
+                if not (isinstance(r.get("vclass"), str) and r["vclass"]):
+                    _w.append("not in your V-universe — unvetted; check fundamentals yourself")
+                if int(r.get("shares", 0)) == 0:
+                    _w.append("too pricey for this budget slice (0 shares)")
+                _de = _fd.get("debt_to_equity")
+                if isinstance(_de, (int, float)) and pd.notna(_de) and _de > 1.5:
+                    _w.append(f"elevated debt (D/E {_de:.1f})")
+                _pe = _fd.get("pe_trailing")
+                if isinstance(_pe, (int, float)) and pd.notna(_pe) and _pe > 80:
+                    _w.append(f"rich valuation (P/E {_pe:.0f})")
+                _pg = _fd.get("profit_growth_pct")
+                if isinstance(_pg, (int, float)) and pd.notna(_pg) and _pg < 0:
+                    _w.append("profit declining (latest)")
+                if not _fd:
+                    _w.append("no fundamentals available (thin / BSE-only name)")
+                if _w:
+                    st.markdown("**⚠️ Watch-outs:** " + " · ".join(_w))
     # open any pick in Stock Analysis (button on_click sets the mode BEFORE widgets instantiate — safe)
     _oc = st.columns([4, 2])
     _opts = ["—"] + [f"{r['ticker']} · {r['company']}" for _, r in _top.iterrows()]
