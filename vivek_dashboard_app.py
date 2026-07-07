@@ -317,54 +317,69 @@ def fetch_market_bulkblock():
 
 @st.cache_data(show_spinner=False, ttl=21600)
 def superstar_stock_scores():
-    """Per-stock conviction score from the superstar feeds (no prices; cheap + cached):
-    consensus (quality-weighted # of gurus holding, from master_stock) + recent buying flow
-    (quarterly moves + last-180d bulk/block, quality-weighted). Also carries the latest guru
-    BUY price/date/name per ticker for the entry / run-up calc."""
-    summ, ms = fetch_superstar_summary(), fetch_master_stock()
-    moves, bb = fetch_superstar_moves(), fetch_superstar_bulkblock()
-    if ms.empty or "ticker" not in ms.columns or "held_by" not in ms.columns:
+    """Per-stock conviction from ONLY the QUALITY superstars — signal BUY/STRONG BUY, Sharpe >= 0.4,
+    Max DD >= -40 — each weighted by their alpha %. Consensus = alpha-weighted count of qualifying
+    holders (full current-holder set from superstar_holdings); flow = those investors' recent
+    quarterly moves + last-180d bulk/block. Non-qualifying superstars get zero weight."""
+    summ = fetch_superstar_summary(); hold = _read_fii_tab("superstar_holdings")
+    moves, bb, ms = fetch_superstar_moves(), fetch_superstar_bulkblock(), fetch_master_stock()
+    if summ.empty or "name" not in summ.columns or hold.empty or "ticker" not in hold.columns:
         return pd.DataFrame()
-    _sig = {"STRONG BUY": 2.0, "BUY": 1.3, "WATCH": 0.7, "HOLD": 0.4, "AVOID": 0.0}
-    if not summ.empty and "name" in summ.columns:
-        summ = summ.copy()
-        summ["qw"] = (summ.get("signal", "").map(_sig).fillna(0.5)
-                      * (1 + pd.to_numeric(summ.get("sharpe_ratio"), errors="coerce").clip(0, 2).fillna(0)))
-        qw = dict(zip(summ["name"].astype(str).str.lower().str.strip(), summ["qw"]))
-    else:
-        qw = {}
-    _q = lambda n: qw.get(str(n).strip().lower(), 0.5)
-    ms = ms.copy(); ms["ticker"] = ms["ticker"].astype(str)
-    ms["n_holders"] = pd.to_numeric(ms["superstar_count"], errors="coerce").fillna(0)
-    ms["qcons"] = ms["held_by"].apply(
-        lambda hb: sum(_q(n.replace(" …", "").replace("…", "")) for n in str(hb).split(",") if n.strip()))
-    _mvw = {"NEW": 3, "ADD": 2, "HOLD": 0, "TRIM": -2, "EXIT": -3, "past": 0}
+    _sh = pd.to_numeric(summ.get("sharpe_ratio"), errors="coerce")
+    _dd = pd.to_numeric(summ.get("max_drawdown_pct"), errors="coerce")
+    _al = pd.to_numeric(summ.get("alpha_ann_pct"), errors="coerce")
+    _qual = (summ.get("signal", pd.Series(index=summ.index, dtype=object)).isin(["STRONG BUY", "BUY"])
+             & (_sh >= 0.4) & (_dd >= -40))
+    summ = summ.copy(); summ["qw"] = _al.clip(lower=1, upper=60).where(_qual, 0).fillna(0)
+    qw = dict(zip(summ["name"].astype(str).str.lower().str.strip(), summ["qw"]))
+    _q = lambda n: qw.get(str(n).strip().lower(), 0.0)
+
+    h = hold.copy(); h["ticker"] = h["ticker"].astype(str)
+    if "move" in h.columns:
+        h = h[~h["move"].astype(str).isin(["EXIT", "past", "nan", "None"])]
+    h["qw"] = h["investor"].map(_q)
+    hq = h[h["qw"] > 0]
+    if hq.empty:
+        return pd.DataFrame()
+    s = hq.groupby("ticker").agg(
+        n_holders=("investor", "nunique"), qcons=("qw", "sum"),
+        held_by=("investor", lambda x: ", ".join(sorted(set(x))[:4]))).reset_index()
+
+    _mvw = {"NEW": 3, "ADD": 2, "HOLD": 0, "TRIM": -2, "EXIT": -3}
+    fm = pd.Series(dtype=float)
     if not moves.empty and "ticker" in moves.columns:
         moves = moves.copy(); moves["ticker"] = moves["ticker"].astype(str)
         moves["w"] = moves["move"].map(_mvw).fillna(0) * moves["investor"].map(_q)
         fm = moves.groupby("ticker")["w"].sum()
-    else:
-        fm = pd.Series(dtype=float)
     fb = pd.Series(dtype=float); lastbuy = pd.DataFrame()
     if not bb.empty and "ticker" in bb.columns:
         bb = bb.copy(); bb["ticker"] = bb["ticker"].astype(str)
         bb["_dt"] = pd.to_datetime(bb["date"], format="mixed", dayfirst=True, errors="coerce")
         bb["priceN"] = pd.to_numeric(bb["price"], errors="coerce")
+        bb["qwv"] = bb["investor"].map(_q)
         _b = bb[bb["_dt"] >= pd.Timestamp.now() - pd.Timedelta(days=180)].copy()
-        _b["w"] = _b["action"].map({"BUY": 2, "SELL": -2}).fillna(0) * _b["investor"].map(_q)
+        _b["w"] = _b["action"].map({"BUY": 2, "SELL": -2}).fillna(0) * _b["qwv"]
         fb = _b.groupby("ticker")["w"].sum()
-        _bu = bb[bb["action"].astype(str).str.upper() == "BUY"].dropna(subset=["_dt", "priceN"]).sort_values("_dt")
+        _bu = bb[(bb["action"].astype(str).str.upper() == "BUY") & (bb["qwv"] > 0)].dropna(subset=["_dt", "priceN"]).sort_values("_dt")
+        if _bu.empty:
+            _bu = bb[bb["action"].astype(str).str.upper() == "BUY"].dropna(subset=["_dt", "priceN"]).sort_values("_dt")
         if not _bu.empty:
-            lastbuy = _bu.groupby("ticker").tail(1).set_index("ticker")[["priceN", "_dt", "investor"]]
-    s = ms[["ticker", "company", "n_holders", "qcons", "recent_action", "total_value_cr", "held_by"]].copy()
+            lastbuy = _bu.groupby("ticker").tail(1).set_index("ticker")[["priceN", "investor"]]
+
     s["flow_raw"] = s["ticker"].map(fm).fillna(0) + s["ticker"].map(fb).fillna(0)
     s["consensus"] = (s["qcons"] / s["qcons"].max() * 40) if s["qcons"].max() > 0 else 0
     _f = s["flow_raw"]
     s["flow"] = ((_f - _f.min()) / (_f.max() - _f.min()) * 30) if _f.max() > _f.min() else 0
-    s["base_score"] = s["consensus"] + s["flow"]
+    if not ms.empty and "ticker" in ms.columns:
+        ms = ms.copy(); ms["ticker"] = ms["ticker"].astype(str)
+        s = s.merge(ms[[c for c in ["ticker", "company", "recent_action", "total_value_cr"] if c in ms.columns]],
+                    on="ticker", how="left")
+    if "company" not in s.columns:
+        s["company"] = s["ticker"]
+    s["company"] = s["company"].fillna(s["ticker"])
     if not lastbuy.empty:
-        s["last_buy_price"] = s["ticker"].map(lastbuy["priceN"])
-        s["last_buy_by"] = s["ticker"].map(lastbuy["investor"])
+        s["last_buy_price"] = s["ticker"].map(lastbuy["priceN"]); s["last_buy_by"] = s["ticker"].map(lastbuy["investor"])
+    s["base_score"] = s["consensus"] + s["flow"]
     return s.sort_values("base_score", ascending=False).reset_index(drop=True)
 
 
@@ -1534,7 +1549,7 @@ render_floating_notes()        # 📒 draggable, always-on-top notes (context-aw
 # ============================================================================
 if _mode == "💡 Allocate ₹":
     st.markdown("## 💡 Suggest & allocate — best names for your budget (superstars × your strategies)")
-    st.caption("Blends **superstar conviction** (who's buying) · your **V-class quality tier** (V40 / V40-N / "
+    st.caption("Blends **quality-superstar conviction** (only BUY/STRONG BUY · Sharpe≥0.4 · MaxDD≥-40, alpha-weighted) (who's buying) · your **V-class quality tier** (V40 / V40-N / "
                "V200) · **live strategy setups** (READY/REVIEW with expected profit & success from your "
                "backtests) + live prices. **Not investment advice** — a ranked screen; verify before buying.")
     _sc = superstar_stock_scores()
