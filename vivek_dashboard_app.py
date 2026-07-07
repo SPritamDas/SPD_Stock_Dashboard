@@ -268,6 +268,14 @@ def fetch_quarter_updates():
     return _read_fii_tab("quarter_updates")
 
 
+@st.cache_data(show_spinner=False, ttl=21600)
+def fetch_superstar_sast():
+    """SEBI SAST Reg 29 disclosures matched to superstars (investor · stock · Acquisition/Sale ·
+    Δ stake % · resulting stake % · Reg29(1)/(2)), written by the notebook's SAST build → the
+    near-real-time (T+2) 'moves' feed that catches accumulation the quarterly holdings miss."""
+    return _read_fii_tab("superstar_sast_deals")
+
+
 @st.cache_data(show_spinner="Loading holdings journey…", ttl=21600)
 def _fetch_holdings_tab():
     """Full per-investor HOLDINGS JOURNEY (investor · ticker · company · move · delta · value · qty +
@@ -1747,6 +1755,46 @@ if _mode == "⭐ Superstars":
             st.caption("📊 **NSE Nifty 50 benchmark** (median over the tracked windows) — the bar to beat. "
                        "Set **Min Sharpe** above its Sharpe, **Max DD ≥** above its drawdown, etc. Each investor "
                        "row also shows its own window-matched **Nifty Sharpe / Ann / Max DD** for a direct compare.")
+
+    # ---- 🔴 SAST Reg-29 moves — near-real-time (T+2) buy/sell from NSE filings ----------
+    _sast = fetch_superstar_sast()
+    if not _sast.empty and "investor" in _sast.columns:
+        if "confidence" in _sast.columns:
+            _hi = _sast[_sast["confidence"].astype(str).str.upper() != "REVIEW"]
+        else:
+            _hi = _sast
+        with st.container(border=True):
+            st.markdown(f"#### 🔴 Live NSE moves — SAST Reg 29 · **{len(_hi)}** confirmed events")
+            st.caption("When a tracked investor **crosses 5%** (Reg 29(1)) or moves **±2%** (Reg 29(2)) in a "
+                       "stock — filed within ~2 days, so it catches accumulation that quarterly holdings miss. "
+                       "🟢 Buy (Acquisition) · 🔴 Sell (Sale). This is the fast signal; the quarterly holdings "
+                       "journey below is the complete-but-slower one.")
+            _show_rev = st.checkbox("Include low-confidence name matches (REVIEW)", value=False, key="sast_rev")
+            _sv = (_sast if _show_rev else _hi).copy()
+            def _emo(a):
+                a = str(a).strip().lower()
+                return "🟢 Buy" if a.startswith("acq") else ("🔴 Sell" if a else "—")
+            if "action" in _sv.columns:
+                _sv["move"] = _sv["action"].map(_emo)
+            _cols = [c for c in ["trade_dates", "investor", "symbol", "company", "move",
+                                 "pct_traded", "pct_after", "reg_type", "confidence"] if c in _sv.columns]
+            st.dataframe(
+                _sv[_cols], hide_index=True, use_container_width=True, height=280,
+                column_config={
+                    "trade_dates": st.column_config.TextColumn("Trade date(s)"),
+                    "investor": st.column_config.TextColumn("Investor"),
+                    "symbol": st.column_config.TextColumn("NSE symbol"),
+                    "company": st.column_config.TextColumn("Company"),
+                    "move": st.column_config.TextColumn("Move"),
+                    "pct_traded": st.column_config.NumberColumn("Δ stake %", format="%.2f",
+                        help="Percent of the company acquired/sold in this disclosure."),
+                    "pct_after": st.column_config.NumberColumn("Stake after %", format="%.2f",
+                        help="The investor's resulting holding after the trade."),
+                    "reg_type": st.column_config.TextColumn("Reg", help="Reg29(1)=crossed 5% · Reg29(2)=±2% move"),
+                    "confidence": st.column_config.TextColumn("Match"),
+                })
+            st.caption("Source: **NSE SAST Reg 29** filings, refreshed nightly. **REVIEW** = uncertain "
+                       "name match (e.g. a common name) — confirm before acting.")
 
     # ---- filters (combine with AND; numeric ones apply only when you enter a value) ----
     def _ncol(df, c):
