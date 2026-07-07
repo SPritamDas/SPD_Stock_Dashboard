@@ -1533,73 +1533,146 @@ render_floating_notes()        # 📒 draggable, always-on-top notes (context-aw
 # 💡 ALLOCATE — score & size a budget across superstar-backed stocks
 # ============================================================================
 if _mode == "💡 Allocate ₹":
-    st.markdown("## 💡 Suggest & allocate — best superstar-backed stocks for your budget")
-    st.caption("A transparent, rules-based **screen + allocator** over public disclosures (superstar "
-               "holdings · recent moves · bulk/block) + live prices. **Not investment advice** — you follow "
-               "disclosed trades *after* they're filed; verify each name and size to your own risk.")
+    st.markdown("## 💡 Suggest & allocate — best names for your budget (superstars × your strategies)")
+    st.caption("Blends **superstar conviction** (who's buying) · your **V-class quality tier** (V40 / V40-N / "
+               "V200) · **live strategy setups** (READY/REVIEW with expected profit & success from your "
+               "backtests) + live prices. **Not investment advice** — a ranked screen; verify before buying.")
     _sc = superstar_stock_scores()
-    if _sc.empty:
-        st.warning("No scoring data yet — run the notebook to populate master_stock / moves / bulk-block."); st.stop()
-    _c = st.columns([2, 2, 2])
+
+    # ---- strategy layer: best live setup per ticker (V-universe backtest engine) ----
+    try:
+        _invt = build_investable_table((cache.get("built", "none") if cache else "none"))
+    except Exception:
+        _invt = pd.DataFrame()
+    _setup = pd.DataFrame()
+    if not _invt.empty and "Ticker" in _invt.columns:
+        _iv = _invt.copy()
+        _iv["_ep"] = pd.to_numeric(_iv.get("Exp Profit %"), errors="coerce").fillna(0)
+        _iv["_sr"] = pd.to_numeric(_iv.get("Success %"), errors="coerce").fillna(0)
+        _iv["_ev"] = _iv["_ep"] * _iv["_sr"] / 100.0
+        _iv = _iv.sort_values("_ev", ascending=False).groupby("Ticker", as_index=False).first()
+        _setup = _iv.rename(columns={"Ticker": "ticker", "Status": "setup", "Strategy": "strategy",
+                                     "Entry": "entry", "Target": "target", "_ep": "exp_profit",
+                                     "_sr": "success", "_ev": "setup_ev"})
+        _setup["ticker"] = _setup["ticker"].astype(str)
+        _setup = _setup[["ticker", "setup", "strategy", "entry", "target", "exp_profit", "success", "setup_ev"]]
+
+    # ---- V-class tier bonus per ticker ----
+    _vpts = {"v_40": 15, "v_40_next": 10, "v_200": 5}
+    _vtier, _vlabel = {}, {}
+    for _g in ("v_40", "v_40_next", "v_200"):
+        for _t in (groups.get(_g, []) if groups else []):
+            _t = str(_t)
+            if _t not in _vtier:
+                _vtier[_t] = _vpts[_g]; _vlabel[_t] = GROUP_LABELS.get(_g, _g)
+
+    if _sc.empty and _setup.empty:
+        st.warning("No data yet — run the notebook (superstar feeds) and build the price cache from **📊 Stocks**.")
+        st.stop()
+
+    _c = st.columns([2, 2, 2, 3])
     _budget = _c[0].number_input("Budget ₹", value=50000, min_value=1000, step=5000)
     _profile = _c[1].selectbox("Risk profile", ["Balanced", "Conservative", "Aggressive"],
-                               help="Balanced ~8 names · Conservative = liquid/diversified ~12 · Aggressive = concentrated ~5, small-caps OK")
-    _n = _c[2].number_input("How many stocks", value={"Balanced": 8, "Conservative": 12, "Aggressive": 5}[_profile],
+                               help="Balanced ~8 · Conservative liquid/diversified ~12 · Aggressive concentrated ~5")
+    _n = _c[2].number_input("How many stocks",
+                            value={"Balanced": 8, "Conservative": 12, "Aggressive": 5}[_profile],
                             min_value=3, max_value=20, step=1)
-    _cand = _sc.copy()
-    _tv = pd.to_numeric(_cand["total_value_cr"], errors="coerce").fillna(0)
+    _need_setup = _c[3].checkbox("Only names with a live strategy setup", value=False,
+                                 help="On → every pick has a defined entry/target/expected-profit from your backtests.")
+
+    # ---- build the candidate universe: superstar stocks ∪ live-setup stocks ----
+    if not _sc.empty:
+        base = _sc.copy()
+    else:
+        base = pd.DataFrame(columns=["ticker", "company", "n_holders", "consensus", "flow",
+                                     "recent_action", "held_by", "last_buy_price", "last_buy_by"])
+    base["ticker"] = base["ticker"].astype(str)
+    if not _setup.empty:
+        _miss = sorted(set(_setup["ticker"]) - set(base["ticker"]))
+        if _miss:
+            base = pd.concat([base, pd.DataFrame({"ticker": _miss})], ignore_index=True)
+        base = base.merge(_setup, on="ticker", how="left")
+    for _cc in ("consensus", "flow", "n_holders"):
+        base[_cc] = pd.to_numeric(base.get(_cc), errors="coerce").fillna(0)
+    if "company" not in base.columns:
+        base["company"] = ""
+    base["company"] = base["company"].fillna("").replace("", pd.NA).fillna(base["ticker"])
+    base["vbonus"] = base["ticker"].map(_vtier).fillna(0)
+    base["vclass"] = base["ticker"].map(_vlabel).fillna("")
+    _ev = pd.to_numeric(base.get("setup_ev"), errors="coerce").fillna(0) if "setup_ev" in base.columns else pd.Series(0, index=base.index)
+    base["setup_bonus"] = (_ev / (_ev.max() or 1) * 22) + (base.get("setup", pd.Series("", index=base.index))
+                                                            .astype(str).str.contains("READY").astype(float) * 6)
+    if _need_setup:
+        base = base[base.get("setup", pd.Series("", index=base.index)).astype(str).str.len() > 0]
+    # profile pre-filter
     if _profile == "Conservative":
-        _cand = _cand[(_cand["n_holders"] >= 4) & (_tv >= _tv.quantile(0.5))]
-    elif _profile == "Balanced":
-        _cand = _cand[_cand["n_holders"] >= 3]
-    _cand = _cand.sort_values("base_score", ascending=False).head(35).copy()
+        _tv = pd.to_numeric(base.get("total_value_cr"), errors="coerce").fillna(0)
+        base = base[(base["n_holders"] >= 3) | (base["vbonus"] >= 10) | (base["setup_bonus"] > 0)]
+    if base.empty:
+        st.info("No candidates matched this profile / filter."); st.stop()
+
+    base["_pre"] = base["consensus"] + base["flow"] + base["vbonus"] + base["setup_bonus"]
+    base = base.sort_values("_pre", ascending=False).head(40).copy()
+
     with st.spinner("Fetching live prices for the top candidates…"):
-        _cand["price"] = _cand["ticker"].map(lambda t: _cur_price(t))
-    _cand = _cand[_cand["price"].notna() & (_cand["price"] > 0)].copy()
-    if _cand.empty:
-        st.info("No priced candidates matched this profile (many are BSE-only)."); st.stop()
-    _cand["runup_pct"] = _cand.apply(
-        lambda r: ((r["price"] - r["last_buy_price"]) / r["last_buy_price"] * 100)
-        if ("last_buy_price" in _cand.columns and pd.notna(r.get("last_buy_price")) and r.get("last_buy_price")) else None, axis=1)
+        base["price"] = base["ticker"].map(lambda t: _cur_price(t))
+    base = base[base["price"].notna() & (base["price"] > 0)].copy()
+    if base.empty:
+        st.info("No priced candidates (many small/BSE-only names lack an NSE quote)."); st.stop()
+
+    _lbp = pd.to_numeric(base.get("last_buy_price"), errors="coerce") if "last_buy_price" in base.columns else pd.Series(pd.NA, index=base.index)
+    base["runup_pct"] = [((p - b) / b * 100) if (pd.notna(b) and b) else None for p, b in zip(base["price"], _lbp)]
     _pen = {"Conservative": 2.0, "Balanced": 1.0, "Aggressive": 0.6}[_profile]
-    _cand["entry"] = _cand["runup_pct"].apply(lambda ru: 12.0 if pd.isna(ru) else float(max(0, 20 - max(0, ru) * 0.2 * _pen)))
+    base["entry_score"] = [12.0 if ru is None or pd.isna(ru) else float(max(0, 20 - max(0, ru) * 0.2 * _pen))
+                           for ru in base["runup_pct"]]
     _fmult = {"Aggressive": 1.6, "Balanced": 1.0, "Conservative": 0.8}[_profile]
-    _cand["final_score"] = _cand["consensus"] + _cand["flow"] * _fmult + _cand["entry"]
-    _top = _cand.sort_values("final_score", ascending=False).head(int(_n)).copy()
-    _w = _top["final_score"].clip(lower=0.1); _w = _w / _w.sum()
-    _w = _w.clip(upper=0.25); _w = _w / _w.sum()                       # diversification cap + renormalise
+    base["score"] = base["consensus"] + base["flow"] * _fmult + base["vbonus"] + base["setup_bonus"] + base["entry_score"]
+    _top = base.sort_values("score", ascending=False).head(int(_n)).copy()
+
+    _w = _top["score"].clip(lower=0.1); _w = _w / _w.sum(); _w = _w.clip(upper=0.25); _w = _w / _w.sum()
     _top["target_inr"] = _w.values * _budget
     _top["shares"] = (_top["target_inr"] // _top["price"]).astype(int)
     _top["invest_inr"] = (_top["shares"] * _top["price"]).round(0)
     _top["weight_pct"] = (_top["invest_inr"] / _budget * 100).round(1)
-    _deployed = _top["invest_inr"].sum(); _left = _budget - _deployed
+    _dep = _top["invest_inr"].sum(); _left = _budget - _dep
+
     def _why(r):
-        bits = [f"{int(r['n_holders'])} gurus hold"]
-        if isinstance(r.get("held_by"), str) and r["held_by"].strip():
-            bits[0] += " (e.g. " + ", ".join([x.strip() for x in r["held_by"].split(",")[:2]]) + ")"
+        bits = []
+        if r.get("n_holders", 0) >= 1:
+            b0 = f"{int(r['n_holders'])} gurus"
+            if isinstance(r.get("held_by"), str) and r["held_by"].strip():
+                b0 += " (e.g. " + ", ".join([x.strip() for x in str(r["held_by"]).split(",")[:2]]) + ")"
+            bits.append(b0)
         if isinstance(r.get("recent_action"), str) and r["recent_action"].strip():
             bits.append(r["recent_action"])
         ru = r.get("runup_pct")
         if pd.notna(ru):
-            bits.append(f"{'+' if ru >= 0 else ''}{ru:.0f}% since {str(r.get('last_buy_by', 'a guru')).title()}'s buy")
-        return " · ".join(bits)
+            bits.append(f"{'+' if ru >= 0 else ''}{ru:.0f}% since {str(r.get('last_buy_by', 'guru')).title()}'s buy")
+        if isinstance(r.get("setup"), str) and r["setup"].strip():
+            bits.append(f"{r['setup']} {r.get('strategy','')} · exp +{r.get('exp_profit',0):.0f}% @ {r.get('success',0):.0f}%")
+        return " · ".join(bits) or "in your V-universe"
     _top["why"] = _top.apply(_why, axis=1)
+
     st.markdown(f"### 📋 {_profile} plan for ₹{_budget:,.0f} — {len(_top)} stocks · "
-                f"₹{_deployed:,.0f} deployed · ₹{_left:,.0f} cash left (rounding)")
-    st.dataframe(
-        _top[["company", "ticker", "price", "invest_inr", "shares", "weight_pct", "final_score", "why"]],
-        hide_index=True, use_container_width=True, column_config={
-            "company": st.column_config.TextColumn("Stock"), "ticker": st.column_config.TextColumn("Ticker"),
-            "price": st.column_config.NumberColumn("Price ₹", format="%.1f"),
-            "invest_inr": st.column_config.NumberColumn("Invest ₹", format="%.0f"),
-            "shares": st.column_config.NumberColumn("Shares"),
-            "weight_pct": st.column_config.NumberColumn("Weight", format="%.1f%%"),
-            "final_score": st.column_config.NumberColumn("Score", format="%.0f"),
-            "why": st.column_config.TextColumn("Why", width="large")})
-    st.caption("**Score** = quality-weighted guru consensus + recent buying flow + entry (penalises names "
-               "already run up since the gurus' buys). Weights ∝ score, capped 25%/stock, whole shares at "
-               "live price; leftover is the rounding remainder. Prices ~1-day cached. **Verify each name in "
-               "📊 Stocks and confirm it fits your goals before buying — this is a screen, not advice.**")
+                f"₹{_dep:,.0f} deployed · ₹{_left:,.0f} cash left (rounding)")
+    _cols = [c for c in ["company", "ticker", "vclass", "price", "invest_inr", "shares", "weight_pct",
+                         "setup", "exp_profit", "success", "score", "why"] if c in _top.columns]
+    st.dataframe(_top[_cols], hide_index=True, use_container_width=True, column_config={
+        "company": st.column_config.TextColumn("Stock"), "ticker": st.column_config.TextColumn("Ticker"),
+        "vclass": st.column_config.TextColumn("Class"),
+        "price": st.column_config.NumberColumn("Price ₹", format="%.1f"),
+        "invest_inr": st.column_config.NumberColumn("Invest ₹", format="%.0f"),
+        "shares": st.column_config.NumberColumn("Shares"),
+        "weight_pct": st.column_config.NumberColumn("Weight", format="%.1f%%"),
+        "setup": st.column_config.TextColumn("Setup"),
+        "exp_profit": st.column_config.NumberColumn("Exp +%", format="%.0f"),
+        "success": st.column_config.NumberColumn("Win %", format="%.0f"),
+        "score": st.column_config.NumberColumn("Score", format="%.0f"),
+        "why": st.column_config.TextColumn("Why", width="large")})
+    st.caption("**Score** = superstar conviction (quality-weighted consensus + recent buying) + **V-class** "
+               "(V40>V40-N>V200) + **live setup** (expected profit × success, READY>REVIEW) + **entry** "
+               "(penalises run-ups since the gurus' buys). Weights ∝ score, capped 25%/stock, whole shares "
+               "at live price. **Verify each name in 📊 Stocks before buying — this is a screen, not advice.**")
     st.stop()
 
 # ============================================================================
