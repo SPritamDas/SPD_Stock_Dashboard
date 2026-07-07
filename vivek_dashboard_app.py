@@ -1955,6 +1955,7 @@ if _mode == "⭐ Superstars":
             _bb["priceN"] = pd.to_numeric(_bb["price"], errors="coerce")
             _bb["move"] = _bb["action"].astype(str).str.upper().map(
                 lambda a: "🟢 Buy" if a == "BUY" else ("🔴 Sell" if a == "SELL" else "—"))
+            _bb["pct_traded"] = pd.to_numeric(_bb["pct_traded"], errors="coerce")
         _isast = fetch_superstar_sast()
         _sast = (_isast[_isast["investor"].astype(str).str.lower() == _pick.lower()]
                  if (not _isast.empty and "investor" in _isast.columns) else pd.DataFrame())
@@ -1963,6 +1964,9 @@ if _mode == "⭐ Superstars":
         _iins = fetch_superstar_insider()
         _ins = (_iins[_iins["investor"].astype(str).str.lower() == _pick.lower()]
                 if (not _iins.empty and "investor" in _iins.columns) else pd.DataFrame())
+        if not _ins.empty:
+            _ins = _ins.drop_duplicates(
+                subset=[c for c in ["report_date", "company", "action", "qty", "traded_pct"] if c in _ins.columns])
 
         st.markdown("### 📊 Deals & performance")
         _tabR, _tabP, _tabA, _tabS, _tabI = st.tabs(
@@ -1972,7 +1976,7 @@ if _mode == "⭐ Superstars":
             "date": st.column_config.TextColumn("Date"), "company": st.column_config.TextColumn("Stock"),
             "entity": st.column_config.TextColumn("Via (account/entity)"), "exchange": st.column_config.TextColumn("Exch"),
             "move": st.column_config.TextColumn("Move"), "qty": st.column_config.TextColumn("Qty"),
-            "price": st.column_config.TextColumn("Avg price ₹"), "pct_traded": st.column_config.TextColumn("% traded"),
+            "price": st.column_config.TextColumn("Avg price ₹"), "pct_traded": st.column_config.NumberColumn("% traded", format="%.2f%%"),
             "deal_type": st.column_config.TextColumn("Type", help="Bulk = >0.5% of company in a day · Block = block-window trade")}
 
         with _tabR:
@@ -2072,6 +2076,9 @@ if _mode == "⭐ Superstars":
                 st.caption(f"No insider/SAST disclosures on record for **{_pick.title()}**.")
             else:
                 _iv = _ins.copy()
+                for _pc in ("holding_after", "traded_pct"):
+                    if _pc in _iv.columns:
+                        _iv[_pc] = pd.to_numeric(_iv[_pc], errors="coerce")
                 _iv["_rd"] = pd.to_datetime(_iv.get("report_date"), format="mixed", dayfirst=True, errors="coerce")
                 _all_i = st.checkbox("Show all (not just last 30 days)", value=False, key=f"ins_all_{_pick}")
                 if not _all_i:
@@ -2083,8 +2090,10 @@ if _mode == "⭐ Superstars":
                 st.dataframe(_iv[_ic], hide_index=True, use_container_width=True, column_config={
                     "report_date": st.column_config.TextColumn("Reported"), "company": st.column_config.TextColumn("Stock"),
                     "person": st.column_config.TextColumn("Person / entity"), "category": st.column_config.TextColumn("Type"),
-                    "action": st.column_config.TextColumn("Action"), "holding_after": st.column_config.TextColumn("Holding after"),
-                    "traded_pct": st.column_config.TextColumn("Traded %"), "regulation": st.column_config.TextColumn("Reg")})
+                    "action": st.column_config.TextColumn("Action"),
+                    "holding_after": st.column_config.NumberColumn("Holding after", format="%.2f%%"),
+                    "traded_pct": st.column_config.NumberColumn("Traded %", format="%.2f%%"),
+                    "regulation": st.column_config.TextColumn("Reg")})
 
         _link = _u("links") or _u("portfolio_url")
         _hold, _quarters, _err = superstar_holdings_journey(_pick)
