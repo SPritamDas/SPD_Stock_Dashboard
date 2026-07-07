@@ -1924,19 +1924,23 @@ if _mode == "⭐ Superstars":
                 return "🟢 Buy" if a == "BUY" else ("🔴 Sell" if a == "SELL" else "—")
             if "action" in _bbv.columns:
                 _bbv["move"] = _bbv["action"].map(_bemo)
-            st.caption(f"**{len(_bbv)}** large single-day trade(s) — catches moves SAST's 5%/±2% thresholds miss.")
-            _bc2 = [c for c in ["date", "symbol", "company", "move", "qty", "price", "deal_type"] if c in _bbv.columns]
+            st.caption(f"**{len(_bbv)}** large single-day trade(s) — catches moves SAST's 5%/±2% thresholds miss. "
+                       "**Via** shows the actual account/entity (AIF, family member, associate co); covers BSE + NSE.")
+            _bc2 = [c for c in ["date", "company", "entity", "exchange", "move", "qty", "price",
+                                "pct_traded", "deal_type"] if c in _bbv.columns]
             st.dataframe(
                 _bbv[_bc2], hide_index=True, use_container_width=True,
                 column_config={
                     "date": st.column_config.TextColumn("Date"),
-                    "symbol": st.column_config.TextColumn("NSE symbol"),
-                    "company": st.column_config.TextColumn("Company"),
+                    "company": st.column_config.TextColumn("Stock"),
+                    "entity": st.column_config.TextColumn("Via (account/entity)"),
+                    "exchange": st.column_config.TextColumn("Exch"),
                     "move": st.column_config.TextColumn("Move"),
                     "qty": st.column_config.TextColumn("Qty"),
-                    "price": st.column_config.TextColumn("Price ₹"),
+                    "price": st.column_config.TextColumn("Avg price ₹"),
+                    "pct_traded": st.column_config.TextColumn("% traded"),
                     "deal_type": st.column_config.TextColumn("Type",
-                        help="bulk = >0.5% of company in a day · block = block-window trade"),
+                        help="Bulk = >0.5% of company in a day · Block = block-window trade"),
                 })
 
         _link = _u("links") or _u("portfolio_url")
