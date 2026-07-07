@@ -1867,32 +1867,37 @@ if _mode == "⭐ Superstars":
 
         # ---- this investor's SAST Reg-29 moves (near-real-time buy/sell; faster than quarterly) ----
         _isast = fetch_superstar_sast()
-        if not _isast.empty and "investor" in _isast.columns:
-            _mine = _isast[_isast["investor"].astype(str).str.lower() == _pick.lower()]
-            if "confidence" in _mine.columns:
-                _mine = _mine[_mine["confidence"].astype(str).str.upper() != "REVIEW"]
-            if not _mine.empty:
-                _mv = _mine.copy()
-                def _emo(a):
-                    a = str(a).strip().lower()
-                    return "🟢 Buy" if a.startswith("acq") else ("🔴 Sell" if a else "—")
-                if "action" in _mv.columns:
-                    _mv["move"] = _mv["action"].map(_emo)
-                st.markdown(f"#### 🔴 Recent NSE moves — **SAST Reg 29** · {len(_mv)} event(s)  "
-                            "· crossed 5% / ±2% stake · filed ~T+2 (faster than the quarterly journey below)")
-                _sc = [c for c in ["trade_dates", "symbol", "company", "move",
-                                   "pct_traded", "pct_after", "reg_type"] if c in _mv.columns]
-                st.dataframe(
-                    _mv[_sc], hide_index=True, use_container_width=True,
-                    column_config={
-                        "trade_dates": st.column_config.TextColumn("Trade date(s)"),
-                        "symbol": st.column_config.TextColumn("NSE symbol"),
-                        "company": st.column_config.TextColumn("Company"),
-                        "move": st.column_config.TextColumn("Move"),
-                        "pct_traded": st.column_config.NumberColumn("Δ stake %", format="%.2f"),
-                        "pct_after": st.column_config.NumberColumn("Stake after %", format="%.2f"),
-                        "reg_type": st.column_config.TextColumn("Reg", help="Reg29(1)=crossed 5% · Reg29(2)=±2% move"),
-                    })
+        _mine = (_isast[_isast["investor"].astype(str).str.lower() == _pick.lower()]
+                 if (not _isast.empty and "investor" in _isast.columns) else pd.DataFrame())
+        if not _mine.empty and "confidence" in _mine.columns:
+            _mine = _mine[_mine["confidence"].astype(str).str.upper() != "REVIEW"]
+        st.markdown("#### 🔴 Recent NSE moves — **SAST Reg 29**  "
+                    "· crossed 5% / ±2% stake · filed ~T+2 (faster than the quarterly journey below)")
+        if _mine.empty:
+            st.caption(f"No recent Reg 29 disclosures for **{_pick.title()}** — they haven't crossed a 5% "
+                       "or ±2% stake threshold in the tracked window. Buy-and-hold names disclose rarely; "
+                       "their full quarterly holdings journey is below.")
+        else:
+            _mv = _mine.copy()
+            def _emo(a):
+                a = str(a).strip().lower()
+                return "🟢 Buy" if a.startswith("acq") else ("🔴 Sell" if a else "—")
+            if "action" in _mv.columns:
+                _mv["move"] = _mv["action"].map(_emo)
+            st.caption(f"**{len(_mv)}** disclosed threshold move(s) — the fast 'is this investor buying/selling now?' signal.")
+            _sc = [c for c in ["trade_dates", "symbol", "company", "move",
+                               "pct_traded", "pct_after", "reg_type"] if c in _mv.columns]
+            st.dataframe(
+                _mv[_sc], hide_index=True, use_container_width=True,
+                column_config={
+                    "trade_dates": st.column_config.TextColumn("Trade date(s)"),
+                    "symbol": st.column_config.TextColumn("NSE symbol"),
+                    "company": st.column_config.TextColumn("Company"),
+                    "move": st.column_config.TextColumn("Move"),
+                    "pct_traded": st.column_config.NumberColumn("Δ stake %", format="%.2f"),
+                    "pct_after": st.column_config.NumberColumn("Stake after %", format="%.2f"),
+                    "reg_type": st.column_config.TextColumn("Reg", help="Reg29(1)=crossed 5% · Reg29(2)=±2% move"),
+                })
 
         _link = _u("links") or _u("portfolio_url")
         _hold, _quarters, _err = superstar_holdings_journey(_pick)
