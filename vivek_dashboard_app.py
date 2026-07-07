@@ -1691,7 +1691,7 @@ if _mode == "💡 Allocate ₹":
     st.markdown(f"### 📋 {_profile} plan for ₹{_budget:,.0f} — {len(_top)} stocks · "
                 f"₹{_dep:,.0f} deployed · ₹{_left:,.0f} cash left (rounding)")
     _cols = [c for c in ["company", "ticker", "vclass", "price", "invest_inr", "shares", "weight_pct",
-                         "strategy", "setup", "exp_profit", "success", "score", "why"] if c in _top.columns]
+                         "strategy", "setup", "exp_profit", "success", "score"] if c in _top.columns]
     st.dataframe(_top[_cols], hide_index=True, use_container_width=True, column_config={
         "company": st.column_config.TextColumn("Stock"), "ticker": st.column_config.TextColumn("Ticker"),
         "vclass": st.column_config.TextColumn("Class"),
@@ -1705,6 +1705,10 @@ if _mode == "💡 Allocate ₹":
         "success": st.column_config.NumberColumn("Win %", format="%.0f"),
         "score": st.column_config.NumberColumn("Score", format="%.0f"),
         "why": st.column_config.TextColumn("Why", width="large")})
+    with st.expander("💬  Why these picks — full reasoning", expanded=True):
+        for _, _r in _top.iterrows():
+            _cl = f" · {_r['vclass']}" if isinstance(_r.get("vclass"), str) and _r["vclass"] else ""
+            st.markdown(f"- **{_r.get('company','')}**  ({_r.get('ticker','')}{_cl}) — {_r.get('why','')}")
     # open any pick in Stock Analysis (button on_click sets the mode BEFORE widgets instantiate — safe)
     _oc = st.columns([4, 2])
     _opts = ["—"] + [f"{r['ticker']} · {r['company']}" for _, r in _top.iterrows()]
