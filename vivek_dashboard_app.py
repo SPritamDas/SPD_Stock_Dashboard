@@ -1765,9 +1765,13 @@ if _mode == "⭐ Superstars":
         st.markdown("---")
         if st.button("🔄  Refresh superstar data", use_container_width=True,
                      help="Re-read the investor summary + re-scrape holdings."):
-            fetch_superstar_summary.clear(); fetch_superstar_holdings.clear(); st.rerun()
-        st.caption("List + metrics from the FII/DII sheet (run the notebook to refresh); "
-                   "holdings scraped **live** from Trendlyne, cached ~6 h.")
+            for _f in (fetch_superstar_summary, fetch_superstar_holdings, fetch_superstar_bulkblock,
+                       fetch_superstar_sast, fetch_superstar_insider, fetch_market_bulkblock):
+                try: _f.clear()
+                except Exception: pass
+            st.rerun()
+        st.caption("List, metrics & deal feeds from the FII/DII sheet (run the notebook to refresh). "
+                   "Click above to reload all tabs after a refresh.")
 
     if _sdf.empty or "name" not in _sdf.columns:
         st.warning("No superstar data found. Run the **fii_dii_investment_pattern.ipynb** notebook "
@@ -1943,9 +1947,12 @@ if _mode == "⭐ Superstars":
                if (not _bb.empty and "investor" in _bb.columns) else pd.DataFrame())
         if not _bb.empty:
             _bb = _bb.copy()
+            for _c in ("date", "ticker", "company", "entity", "exchange", "action", "qty", "price", "pct_traded", "deal_type"):
+                if _c not in _bb.columns:                # tolerate an older cached schema (e.g. pre-ticker)
+                    _bb[_c] = ""
             _bb["_dt"] = pd.to_datetime(_bb["date"], format="mixed", dayfirst=True, errors="coerce")
-            _bb["qtyN"] = pd.to_numeric(_bb.get("qty"), errors="coerce")
-            _bb["priceN"] = pd.to_numeric(_bb.get("price"), errors="coerce")
+            _bb["qtyN"] = pd.to_numeric(_bb["qty"], errors="coerce")
+            _bb["priceN"] = pd.to_numeric(_bb["price"], errors="coerce")
             _bb["move"] = _bb["action"].astype(str).str.upper().map(
                 lambda a: "🟢 Buy" if a == "BUY" else ("🔴 Sell" if a == "SELL" else "—"))
         _isast = fetch_superstar_sast()
