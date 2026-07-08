@@ -315,6 +315,18 @@ def fetch_market_bulkblock():
     return _read_fii_tab("market_bulkblock_deals")
 
 
+@st.cache_data(show_spinner=False, ttl=21600)
+def fetch_fii_dii_flow():
+    """Daily net FII/FPI & DII cash-market flow (accumulated by the notebook) → Markets → FII/DII."""
+    return _read_fii_tab("fii_dii_flow")
+
+
+@st.cache_data(show_spinner=False, ttl=21600)
+def fetch_ipo_dashboard():
+    """IPO list — investorgain GMP + NSE enrich (notebook build_ipo_feed) → Markets → IPOs."""
+    return _read_fii_tab("ipo_dashboard")
+
+
 # raw column name -> the SAME friendly label shown in each table's header, so the filter dropdowns
 # read like the columns the user actually sees (not snake_case internals like 'score_vs_benchmark').
 _FILTER_LABELS = {
@@ -1493,7 +1505,14 @@ _FLOAT_NOTES_HTML = r"""
       wrap.style.display = ''; wrap.classList.remove('min'); reopen.style.display = 'none'; UI.closed = false; UI.min = false;
     });
 
-    if (UI.left != null && UI.top != null) { wrap.style.right = 'auto'; wrap.style.bottom = 'auto'; wrap.style.left = UI.left + 'px'; wrap.style.top = UI.top + 'px'; }
+    if (UI.left != null && UI.top != null) {
+      // clamp into the viewport so the drag-head (minimize/close) is ALWAYS reachable,
+      // even if a prior session saved an off-screen position.
+      var _cl = Math.max(0, Math.min(UI.left, W.innerWidth - 60));
+      var _ct = Math.max(54, Math.min(UI.top, W.innerHeight - 60));
+      wrap.style.right = 'auto'; wrap.style.bottom = 'auto';
+      wrap.style.left = _cl + 'px'; wrap.style.top = _ct + 'px';
+    }
     if (UI.min) wrap.classList.add('min');
     if (UI.closed) { wrap.style.display = 'none'; reopen.style.display = 'block'; }
 
@@ -1866,11 +1885,13 @@ _SUBVIEWS = {
     "📊 Analyze":  [("📈 Stocks", "📊 Stocks"), ("🌐 Indices", "🌐 Indices")],
     "💡 Ideas":    [("🎯 Buy setups", "💎 Investable now"), ("💰 Size a budget", "💡 Allocate ₹")],
     "⭐ Investors": [("📋 Investor list", "⭐ Superstars"), ("🔔 Recent moves", "🔔 Alerts")],
+    "🌍 Markets":  [("📅 Today", "🌍 Today"), ("📉 FII/DII flow", "🌍 FII/DII"), ("🚀 IPOs", "🌍 IPOs")],
 }
-_SUBKEY = {"📊 Analyze": "nav_analyze", "💡 Ideas": "nav_ideas", "⭐ Investors": "nav_investors"}
+_SUBKEY = {"📊 Analyze": "nav_analyze", "💡 Ideas": "nav_ideas", "⭐ Investors": "nav_investors", "🌍 Markets": "nav_markets"}
 with st.sidebar:
     _section = st.radio("Section", list(_SUBVIEWS), key="nav_section",
-                        captions=["Look up any stock or index", "What to buy", "What the big money is doing"])
+                        captions=["Look up any stock or index", "What to buy",
+                                  "What the big money is doing", "The macro tape"])
     _subs = _SUBVIEWS[_section]
     _sub = st.radio("View", [lbl for lbl, _m in _subs], horizontal=True, key=_SUBKEY[_section])
     _mode = dict(_subs).get(_sub, _subs[0][1])
@@ -1879,7 +1900,8 @@ st.session_state["app_mode"] = _mode      # keep the legacy key in sync for any 
 # single heading per mode (no duplicate title)
 st.title("📈 SPritamDas — " + {"🌐 Indices": "Index Analysis", "⭐ Superstars": "Superstar Analysis",
                                 "🔔 Alerts": "FII/DII Alerts", "💎 Investable now": "Investable Now",
-                                "💡 Allocate ₹": "Suggest & Allocate"}.get(_mode, "Stock Analysis"))
+                                "💡 Allocate ₹": "Suggest & Allocate", "🌍 Today": "Markets Today",
+                                "🌍 FII/DII": "FII / DII Flow", "🌍 IPOs": "IPO Dashboard"}.get(_mode, "Stock Analysis"))
 render_floating_calculator()   # 🧮 draggable, always-on-top calculator (hovers over the chart)
 render_floating_notes()        # 📒 draggable, always-on-top notes (context-aware, persists in the browser)
 
@@ -3303,6 +3325,155 @@ if _mode == "🔔 Alerts":
                         _c2.markdown("**🔴 Left the list**\n\n"
                                      + ("\n".join(f"- {n}" for n in _ext) if _ext else "_none_"))
 
+    st.stop()
+
+# ============================================================================
+# 🌍 MARKETS — the macro tape: today's overview · FII/DII flow · IPOs
+# ============================================================================
+if _mode == "🌍 FII/DII":
+    st.markdown("## 📉 FII / DII — daily cash-market flow")
+    _flow = fetch_fii_dii_flow()
+    if _flow.empty or "net_cr" not in _flow.columns:
+        st.info("No FII/DII data yet — run the notebook (`build_fii_dii_flow`); it reads NSE's daily "
+                "FII/DII activity and builds a rolling series (one session per refresh).")
+        st.stop()
+    _flow = _flow.copy()
+    _flow["_dt"] = pd.to_datetime(_flow["date"].astype(str).str.strip(), errors="coerce")
+    for _c in ("buy_cr", "sell_cr", "net_cr"):
+        _flow[_c] = pd.to_numeric(_flow[_c], errors="coerce")
+    _flow = _flow.dropna(subset=["_dt"]).sort_values("_dt")
+    _latest = _flow["_dt"].max()
+    _cur = _flow[_flow["_dt"] == _latest]
+    _fii = float(_cur[_cur["category"] == "FII"]["net_cr"].sum())
+    _dii = float(_cur[_cur["category"] == "DII"]["net_cr"].sum())
+    st.caption(f"Latest session **{_latest.date()}** · cash market · ₹ crore · **positive = net buying**. "
+               "NSE posts one session at a time, so the history fills in one trading day per refresh.")
+    _mc = st.columns(3)
+    _mc[0].metric("FII / FPI net", f"₹{_fii:,.0f} cr", delta=f"{_fii:+,.0f}")
+    _mc[1].metric("DII net", f"₹{_dii:,.0f} cr", delta=f"{_dii:+,.0f}")
+    _mc[2].metric("Combined net", f"₹{_fii + _dii:,.0f} cr", delta=f"{_fii + _dii:+,.0f}")
+    _win = st.selectbox("Window", ["Last 15 sessions", "Last 30", "Last 60", "All"], key="fd_win")
+    _piv = _flow.pivot_table(index="_dt", columns="category", values="net_cr", aggfunc="sum").sort_index()
+    _n = {"Last 15 sessions": 15, "Last 30": 30, "Last 60": 60}.get(_win)
+    if _n:
+        _piv = _piv.tail(_n)
+    import plotly.graph_objects as _go
+    _fig = _go.Figure()
+    if "FII" in _piv.columns:
+        _fig.add_bar(x=_piv.index, y=_piv["FII"], name="FII / FPI", marker_color="#6AA6FF")
+    if "DII" in _piv.columns:
+        _fig.add_bar(x=_piv.index, y=_piv["DII"], name="DII", marker_color="#E3B341")
+    _fig.update_layout(barmode="group", template="plotly_dark", height=400,
+                       margin=dict(l=8, r=8, t=28, b=8), paper_bgcolor="rgba(0,0,0,0)",
+                       plot_bgcolor="rgba(0,0,0,0)", legend=dict(orientation="h", y=1.12, x=0),
+                       yaxis_title="Net ₹ crore", bargap=0.25, bargroupgap=0.1)
+    _fig.add_hline(y=0, line_color="#3A3F49", line_width=1)
+    st.plotly_chart(_fig, use_container_width=True, config={"displaylogo": False})
+    with st.expander("📄 Raw daily figures"):
+        st.dataframe(filter_ui(_flow[["date", "category", "buy_cr", "sell_cr", "net_cr"]]
+                               .sort_values("date", ascending=False), "fiidii_raw"),
+                     hide_index=True, use_container_width=True, height=320, column_config={
+                         "date": st.column_config.TextColumn("Date"), "category": st.column_config.TextColumn("Who"),
+                         "buy_cr": st.column_config.NumberColumn("Buy ₹cr", format="%.0f"),
+                         "sell_cr": st.column_config.NumberColumn("Sell ₹cr", format="%.0f"),
+                         "net_cr": st.column_config.NumberColumn("Net ₹cr", format="%+.0f")})
+    st.stop()
+
+if _mode == "🌍 IPOs":
+    st.markdown("## 🚀 IPO dashboard")
+    _ipo = fetch_ipo_dashboard()
+    if _ipo.empty or "name" not in _ipo.columns:
+        st.info("No IPO data yet — run the notebook (`build_ipo_feed`).")
+        st.stop()
+    _ipo = _ipo.copy()
+    _ipo["gmp_expected_pct"] = pd.to_numeric(_ipo["gmp_expected_pct"], errors="coerce")
+    st.caption("Open & upcoming IPOs with **GMP / expected listing gain %** from investorgain "
+               "(**unofficial grey-market estimate — indicative only**), enriched with NSE symbol, live "
+               "subscription & status where the names match.")
+    _mrow = st.columns(3)
+    _mrow[0].metric("IPOs tracked", len(_ipo))
+    if _ipo["gmp_expected_pct"].notna().any():
+        _best = _ipo.loc[_ipo["gmp_expected_pct"].idxmax()]
+        _mrow[1].metric("Highest GMP", f"{_best['gmp_expected_pct']:.0f}%", delta=str(_best['name'])[:22])
+    _mrow[2].metric("NSE-matched", int((_ipo["nse_matched"] == "yes").sum()))
+    _fc = st.columns([2, 2, 4])
+    _cats = sorted(x for x in _ipo["category"].dropna().astype(str).unique() if x.strip())
+    _cat = _fc[0].multiselect("Board", _cats, key="ipo_cat")
+    _q = _fc[2].text_input("🔎 Search IPO", key="ipo_q").strip().lower()
+    v = _ipo
+    if _cat:
+        v = v[v["category"].astype(str).isin(_cat)]
+    if _q:
+        v = v[v["name"].astype(str).str.lower().str.contains(_q, na=False)]
+    _show = ["name", "symbol", "category", "status", "price_band", "gmp_expected_pct",
+             "subscription_x", "est_listing_date", "open_date", "close_date", "lot", "rating"]
+    st.dataframe(filter_ui(v[[c for c in _show if c in v.columns]], "ipo_tbl"),
+                 hide_index=True, use_container_width=True, height=560, column_config={
+                     "name": st.column_config.TextColumn("IPO", width="large"),
+                     "symbol": st.column_config.TextColumn("NSE"),
+                     "category": st.column_config.TextColumn("Board"),
+                     "status": st.column_config.TextColumn("Status"),
+                     "price_band": st.column_config.TextColumn("Price band"),
+                     "gmp_expected_pct": st.column_config.NumberColumn("GMP / exp gain", format="%.1f%%",
+                         help="Grey-market premium as % of issue price ≈ expected listing gain. UNOFFICIAL."),
+                     "subscription_x": st.column_config.TextColumn("Subscribed"),
+                     "est_listing_date": st.column_config.TextColumn("Est. listing"),
+                     "open_date": st.column_config.TextColumn("Opens"),
+                     "close_date": st.column_config.TextColumn("Closes"),
+                     "lot": st.column_config.TextColumn("Lot"),
+                     "rating": st.column_config.TextColumn("Rating")})
+    st.caption("⚠️ GMP is a **grey-market estimate** (investorgain) — not official, not a guarantee; it "
+               "moves daily and can vanish at listing. Use only as a sentiment gauge.")
+    st.stop()
+
+if _mode == "🌍 Today":
+    st.markdown("## 📅 Markets today — the tape at a glance")
+    _flow = fetch_fii_dii_flow()
+    if not _flow.empty and "net_cr" in _flow.columns:
+        _flow = _flow.copy()
+        _flow["_dt"] = pd.to_datetime(_flow["date"].astype(str).str.strip(), errors="coerce")
+        _flow["net_cr"] = pd.to_numeric(_flow["net_cr"], errors="coerce")
+        _ld = _flow["_dt"].max()
+        _cur = _flow[_flow["_dt"] == _ld]
+        _fii = float(_cur[_cur["category"] == "FII"]["net_cr"].sum())
+        _dii = float(_cur[_cur["category"] == "DII"]["net_cr"].sum())
+        st.markdown(f"#### 💵 Institutional flow · {_ld.date() if pd.notna(_ld) else '—'}")
+        _fc = st.columns(3)
+        _fc[0].metric("FII / FPI net", f"₹{_fii:,.0f} cr", delta=f"{_fii:+,.0f}")
+        _fc[1].metric("DII net", f"₹{_dii:,.0f} cr", delta=f"{_dii:+,.0f}")
+        _fc[2].metric("Combined", f"₹{_fii + _dii:,.0f} cr", delta=f"{_fii + _dii:+,.0f}")
+    st.markdown("#### ⭐ Quality-superstar recent moves")
+    _qm, _qmeta = build_quality_moves(days=45)
+    if _qmeta and not _qm.empty:
+        _qv = _qm.copy()
+        _qv["investor"] = _qv["investor"].astype(str).str.title()
+        _qv["_d"] = _qv["_dt"].dt.date.astype(str).where(_qv["_dt"].notna(), _qv["date"].astype(str))
+        _qcols = ["_d", "investor", "source", "side", "stock", "exchange", "detail"]
+        st.caption(f"Every SAST · bulk · block · insider disclosure by the {len(_qmeta)} quality investors, last 45 days.")
+        st.dataframe(filter_ui(_qv[[c for c in _qcols if c in _qv.columns]], "today_qm"),
+                     hide_index=True, use_container_width=True, height=340, column_config={
+                         "_d": st.column_config.TextColumn("Date"), "investor": st.column_config.TextColumn("Investor"),
+                         "source": st.column_config.TextColumn("Via"), "side": st.column_config.TextColumn("Side"),
+                         "stock": st.column_config.TextColumn("Stock"), "exchange": st.column_config.TextColumn("Exch"),
+                         "detail": st.column_config.TextColumn("Details", width="large")})
+    else:
+        st.caption("No quality-superstar moves on record yet.")
+    _mkt = fetch_market_bulkblock()
+    if not _mkt.empty and "symbol" in _mkt.columns:
+        _mkt = _mkt.copy()
+        _mkt["_dt"] = pd.to_datetime(_mkt["date"].astype(str).str.strip(), errors="coerce")
+        _mq = pd.to_numeric(_mkt.get("qty").astype(str).str.replace(",", "", regex=False), errors="coerce")
+        _mp = pd.to_numeric(_mkt.get("price").astype(str).str.replace(",", "", regex=False), errors="coerce")
+        _mkt["_val"] = _mq * _mp
+        _ldm = _mkt["_dt"].max()
+        _big = _mkt[_mkt["_dt"] == _ldm].sort_values("_val", ascending=False).head(15)
+        st.markdown(f"#### 🔥 Biggest bulk / block deals · {_ldm.date() if pd.notna(_ldm) else '—'}")
+        st.dataframe(_big[[c for c in ["exchange", "symbol", "company", "client", "action", "qty", "price", "deal_type"] if c in _big.columns]],
+                     hide_index=True, use_container_width=True, height=300, column_config={
+                         "exchange": st.column_config.TextColumn("Exch"), "symbol": st.column_config.TextColumn("Symbol"),
+                         "company": st.column_config.TextColumn("Stock"), "client": st.column_config.TextColumn("Client"),
+                         "action": st.column_config.TextColumn("Side"), "qty": st.column_config.TextColumn("Qty"),
+                         "price": st.column_config.TextColumn("Price ₹"), "deal_type": st.column_config.TextColumn("Type")})
     st.stop()
 
 # ---- sidebar: strategy + cache controls ----
