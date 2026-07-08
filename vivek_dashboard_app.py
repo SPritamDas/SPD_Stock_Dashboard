@@ -2960,52 +2960,49 @@ if _mode == "🔔 Alerts":
             st.caption("This counts **all** tracked superstars. The criteria-filtered 'best investor' new buys are "
                        "in the **🆕 New buys** section below.")
 
-    # ---- 🚨 PIPELINE HEALTH (flags issues in the data/notebook pipeline) ----
-    with st.container(border=True):
-        st.markdown("### 🚨 Pipeline health")
-        alarms = []   # (level_emoji, message)
-        if _sdf.empty:
-            alarms.append(("🔴", "Investor **summary missing/empty** — run the `fii_dii` notebook "
-                                 "(India: Cell 6 scrape → Cell 9 metrics)."))
-        else:
-            if "data_to" in _sdf.columns:
-                _dt = pd.to_datetime(_sdf["data_to"], errors="coerce").max()
-                if pd.notna(_dt) and (datetime.now() - _dt).days > 130:
-                    alarms.append(("🟡", f"Investor data looks **stale** — latest disclosed quarter is "
-                                         f"{_dt.date()} ({(datetime.now() - _dt).days} days ago). Re-run the notebook."))
-            if "ann_return_pct" in _sdf.columns and len(_sdf):
-                _full = int(pd.to_numeric(_sdf["ann_return_pct"], errors="coerce").notna().sum())
-                if _full / len(_sdf) < 0.7:
-                    alarms.append(("🟡", f"**Low metric coverage** — only {_full}/{len(_sdf)} investors have full "
-                                         "metrics (a scrape may have partially failed / been throttled)."))
-        _ms = fetch_master_stock()
-        if _ms.empty:
-            alarms.append(("🟡", "**master_stock not built** — run notebook Cell 14 (`build_master_stock`)."))
-        elif "as_of" in _ms.columns:
-            _msd = pd.to_datetime(_ms["as_of"], errors="coerce").max()
-            if pd.notna(_msd) and (datetime.now() - _msd).days > 8:
-                alarms.append(("🟡", f"**master_stock is stale** — last built {_msd.date()} "
-                                     f"({(datetime.now() - _msd).days} days ago). Re-run Cell 14 (it's meant to run daily)."))
-        try:
-            import glob
-            _here = os.path.dirname(os.path.abspath(__file__))
-            _bases = {_here, os.path.dirname(_here), os.getcwd(), os.path.dirname(os.getcwd())}
-            _names = ("master_stock_checkpoint.csv",                       # only OUR pipeline's files
-                      "fii_dii_indian_investment_summary_checkpoint.csv",
-                      "fii_dii_us_investment_summary_checkpoint.csv")
-            _ck = sorted({os.path.basename(p) for b in _bases for nm in _names
-                          for p in glob.glob(os.path.join(b, nm))})
-            if _ck:
-                alarms.append(("🟡", "A scrape is **in progress or was interrupted** — checkpoint(s) present: "
-                                     f"`{', '.join(_ck)}`. If no run is active, re-run the notebook to finish "
-                                     "(it resumes & retries failures)."))
-        except Exception:
-            pass
-        if not alarms:
-            st.success("🟢 All clear — summary present & fresh · master_stock current · no interrupted runs.")
-        else:
+    # ---- 🔧 PIPELINE HEALTH — only shows when something actually needs attention (else silent) ----
+    alarms = []   # (level_emoji, message)
+    if _sdf.empty:
+        alarms.append(("🔴", "Investor **data is missing/empty** — the nightly refresh hasn't run yet."))
+    else:
+        if "data_to" in _sdf.columns:
+            _dt = pd.to_datetime(_sdf["data_to"], errors="coerce").max()
+            if pd.notna(_dt) and (datetime.now() - _dt).days > 130:
+                alarms.append(("🟡", f"Investor data looks **stale** — latest disclosed quarter is "
+                                     f"{_dt.date()} ({(datetime.now() - _dt).days} days ago)."))
+        if "ann_return_pct" in _sdf.columns and len(_sdf):
+            _full = int(pd.to_numeric(_sdf["ann_return_pct"], errors="coerce").notna().sum())
+            if _full / len(_sdf) < 0.7:
+                alarms.append(("🟡", f"**Low metric coverage** — only {_full}/{len(_sdf)} investors have full "
+                                     "metrics (a refresh may have been throttled)."))
+    _ms = fetch_master_stock()
+    if _ms.empty:
+        alarms.append(("🟡", "**master_stock not built** — the daily refresh needs to run."))
+    elif "as_of" in _ms.columns:
+        _msd = pd.to_datetime(_ms["as_of"], errors="coerce").max()
+        if pd.notna(_msd) and (datetime.now() - _msd).days > 8:
+            alarms.append(("🟡", f"**master_stock is stale** — last built {_msd.date()} "
+                                 f"({(datetime.now() - _msd).days} days ago)."))
+    try:
+        import glob
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _bases = {_here, os.path.dirname(_here), os.getcwd(), os.path.dirname(os.getcwd())}
+        _names = ("master_stock_checkpoint.csv",                       # only OUR pipeline's files
+                  "fii_dii_indian_investment_summary_checkpoint.csv",
+                  "fii_dii_us_investment_summary_checkpoint.csv")
+        _ck = sorted({os.path.basename(p) for b in _bases for nm in _names
+                      for p in glob.glob(os.path.join(b, nm))})
+        if _ck:
+            alarms.append(("🟡", "A refresh is **in progress or was interrupted** "
+                                 f"(checkpoint present: `{', '.join(_ck)}`)."))
+    except Exception:
+        pass
+    if alarms:      # stay silent when healthy; surface (collapsed unless critical) only when not
+        _hard = any(_lvl == "🔴" for _lvl, _ in alarms)
+        with st.expander(("🔴 Data needs attention" if _hard else "🟡 Data — minor issues"), expanded=_hard):
             for _lvl, _msg in alarms:
                 (st.error if _lvl == "🔴" else st.warning)(f"{_lvl} {_msg}")
+            st.caption("For the maintainer: re-run the nightly refresh (`run_daily.sh`) on a residential IP.")
 
     if _sdf.empty:
         st.stop()
@@ -3157,39 +3154,42 @@ with st.sidebar:
                         format_func=lambda k: core.STRATEGY_LABELS.get(k, k), key="strat_sel")
     cfg = vs.STRATEGY_CONFIG[skey]
 
-    st.markdown("**Cache** — refresh from Yahoo")
-    if st.button("📈  Refresh prices  ·  daily", use_container_width=True,
-                 help="Re-fetch all OHLCV (run DAILY). Keeps fundamentals as-is."):
-        cache = build_full_cache(groups, do_prices=True, do_fund=False, prev=cache)
-        st.success(f"Prices refreshed — {len(cache['data'])} tickers.")
-        st.rerun()
-    if st.button("📊  Refresh fundamentals  ·  quarterly", use_container_width=True,
-                 help="Re-fetch fundamentals (only when needed). Keeps prices as-is."):
-        cache = build_full_cache(groups, do_prices=False, do_fund=True, prev=cache)
-        st.success(f"Fundamentals refreshed — {len(cache.get('fund', {}))} tickers.")
-        st.rerun()
-    if st.button("🔄  Build all  ·  first time", use_container_width=True,
-                 help="Fetch BOTH prices and fundamentals from scratch."):
-        cache = build_full_cache(groups, do_prices=True, do_fund=True)
-        st.success(f"Built — {len(cache['data'])} tickers.")
-        st.rerun()
+    # freshness tag stays visible (one glance = "is my data current?"); the rebuild controls are advanced
     if cache:
-        _p = (cache.get("built_prices") or cache.get("built") or "")[:16].replace("T", " ")
-        _f = (cache.get("built_fund") or "")[:16].replace("T", " ")
-        _through = None
         try:                                         # newest candle date across cached tickers
             _through = max(df["Date"].iloc[-1] for df in (cache.get("data") or {}).values()
                            if df is not None and len(df))
             _through = pd.Timestamp(_through).date()
-        except Exception:
-            _through = None
-        if _through is not None:
             _ago = (datetime.now().date() - _through).days
             _tag = "✅" if _ago <= 0 else ("🟢" if _ago <= 3 else "⚠️")
-            st.caption(f"🕒 **data through {_through}** {_tag}")
-        st.caption(f"refreshed — prices: {_p or '—'} · fundamentals: {_f or '—'}")
-    else:
-        st.caption("No cache yet — click **Build all** first.")
+            st.caption(f"🕒 **Data through {_through}** {_tag}")
+        except Exception:
+            pass
+
+    with st.expander("⚙️ Data & cache (advanced)", expanded=False):
+        st.caption("The nightly job rebuilds this automatically — you rarely need these. "
+                   "Use only if the data looks stale.")
+        if st.button("📈  Refresh prices  ·  daily", use_container_width=True,
+                     help="Re-fetch all OHLCV (run DAILY). Keeps fundamentals as-is."):
+            cache = build_full_cache(groups, do_prices=True, do_fund=False, prev=cache)
+            st.success(f"Prices refreshed — {len(cache['data'])} tickers.")
+            st.rerun()
+        if st.button("📊  Refresh fundamentals  ·  quarterly", use_container_width=True,
+                     help="Re-fetch fundamentals (only when needed). Keeps prices as-is."):
+            cache = build_full_cache(groups, do_prices=False, do_fund=True, prev=cache)
+            st.success(f"Fundamentals refreshed — {len(cache.get('fund', {}))} tickers.")
+            st.rerun()
+        if st.button("🔄  Build all  ·  first time", use_container_width=True,
+                     help="Fetch BOTH prices and fundamentals from scratch."):
+            cache = build_full_cache(groups, do_prices=True, do_fund=True)
+            st.success(f"Built — {len(cache['data'])} tickers.")
+            st.rerun()
+        if cache:
+            _p = (cache.get("built_prices") or cache.get("built") or "")[:16].replace("T", " ")
+            _f = (cache.get("built_fund") or "")[:16].replace("T", " ")
+            st.caption(f"refreshed — prices: {_p or '—'} · fundamentals: {_f or '—'}")
+        else:
+            st.caption("No cache yet — click **Build all** first.")
 
 # group columns shown as tabs (V40 / V40-N / V200)
 real_cols = [c for c in GROUP_COLUMNS if c in groups]
