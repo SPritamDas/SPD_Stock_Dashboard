@@ -315,6 +315,45 @@ def fetch_market_bulkblock():
     return _read_fii_tab("market_bulkblock_deals")
 
 
+def filter_ui(df, key, *, label="🔎 Filter columns"):
+    """Reusable, collapsed-by-default per-column filter for ANY table. Renders a small popover button;
+    returns the filtered DataFrame (call st.dataframe on the result). Adds column filtering everywhere
+    WITHOUT cluttering the default view — the widgets live inside the popover.
+      · numeric column (mostly numbers, many distinct)  -> min/max range slider
+      · categorical (≤ 40 distinct values)              -> multiselect
+      · anything else (free text / high-cardinality)    -> 'contains' text box
+    Each table must pass a UNIQUE `key` (seeds the widget keys)."""
+    if df is None or getattr(df, "empty", True) or len(df.columns) == 0:
+        return df
+    with st.popover(label):
+        pick = st.multiselect("Pick column(s) to filter", list(df.columns), key=f"{key}__cols",
+                              help="Choose one or more columns, then set the value/range to filter on.")
+        out = df
+        for c in pick:
+            s = df[c]
+            wkey = f"{key}__{c}"
+            snum = pd.to_numeric(s, errors="coerce")
+            nunq = int(s.nunique(dropna=True))
+            if snum.notna().mean() >= 0.8 and nunq >= 5:                       # numeric (%, price, days…) → range slider
+                lo, hi = float(snum.min()), float(snum.max())
+                if lo < hi:
+                    a, b = st.slider(str(c), lo, hi, (lo, hi), key=wkey)
+                    out = out[pd.to_numeric(out[c], errors="coerce").between(a, b)]
+            elif 0 < nunq <= 40:                                               # categorical / few-valued → multiselect
+                opts = sorted(map(str, s.dropna().unique()))
+                sel = st.multiselect(str(c), opts, key=wkey)
+                if sel:
+                    out = out[out[c].astype(str).isin(sel)]
+            else:                                                              # text → contains
+                q = st.text_input(f"{c} contains", key=wkey).strip()
+                if q:
+                    out = out[out[c].astype(str).str.contains(q, case=False, na=False, regex=False)]
+    if len(out) != len(df):
+        st.caption(f"🔎 Column filters active — showing **{len(out)}** of {len(df)} rows. "
+                   "(Clear them in the Filter columns popover.)")
+    return out
+
+
 def _quality_meta(summ):
     """{investor_lower: {signal, alpha, sharpe, maxdd}} for QUALITY superstars ONLY — the exact bar
     superstar_stock_scores() uses: signal BUY/STRONG BUY · Sharpe >= 0.4 · Max DD >= -40."""
@@ -1833,7 +1872,7 @@ if _mode == "💡 Allocate ₹":
                 f"₹{_dep:,.0f} deployed · ₹{_left:,.0f} cash left (rounding)")
     _cols = [c for c in ["company", "ticker", "vclass", "price", "invest_inr", "shares", "weight_pct",
                          "strategy", "setup", "exp_profit", "success", "score"] if c in _top.columns]
-    st.dataframe(_top[_cols], hide_index=True, use_container_width=True, column_config={
+    st.dataframe(filter_ui(_top[_cols], "top_movers"), hide_index=True, use_container_width=True, column_config={
         "company": st.column_config.TextColumn("Stock"), "ticker": st.column_config.TextColumn("Ticker"),
         "vclass": st.column_config.TextColumn("Class"),
         "price": st.column_config.NumberColumn("Price ₹", format="%.1f"),
@@ -1987,6 +2026,7 @@ if _mode == "💎 Investable now":
                "Tick **✓** as you review each · click any column header to sort.")
     _icols = ["Reviewed", "Ticker", "Group", "Strategy", "Status", "Entry", "Target", "Exp Profit %",
               "Success %", "Exp. days", "Median days", "Opportunities", "Avg Win %", "Last Opp"]
+    _inv = filter_ui(_inv, "investable")     # per-column filter (Group/Strategy/Status/Entry/Success%/…)
     _iedit = st.data_editor(
         _inv, hide_index=True, use_container_width=True, height=620, column_order=_icols,
         disabled=[c for c in _icols if c != "Reviewed"],
@@ -2326,8 +2366,8 @@ if _mode == "⭐ Superstars":
             st.caption(f"Showing **{len(_mv)}** of {len(_mkt)} market-wide deals (NSE {_nn} · BSE {_nb}). "
                        "Refreshed nightly by the notebook. BSE stocks show their BSE ticker/short name.")
             st.dataframe(
-                _mv[[c for c in ["date", "exchange", "symbol", "company", "client", "action", "qty", "price", "deal_type"]
-                     if c in _mv.columns]],
+                filter_ui(_mv[[c for c in ["date", "exchange", "symbol", "company", "client", "action", "qty", "price", "deal_type"]
+                     if c in _mv.columns]], "mkt_deals"),
                 hide_index=True, use_container_width=True, height=360, column_config={
                     "date": st.column_config.TextColumn("Date"), "exchange": st.column_config.TextColumn("Exch"),
                     "symbol": st.column_config.TextColumn("Symbol"),
@@ -2493,7 +2533,7 @@ if _mode == "⭐ Superstars":
             else:
                 _r = _bb[_bb["_dt"] >= pd.Timestamp.now() - pd.Timedelta(days=90)].sort_values("_dt", ascending=False)
                 st.caption(f"**{len(_r)}** bulk/block trade(s) in the last 3 months — BSE + NSE, all entities.")
-                st.dataframe(_r[[c for c in _bbshow if c in _r.columns]], hide_index=True,
+                st.dataframe(filter_ui(_r[[c for c in _bbshow if c in _r.columns]], "ss_bb_recent"), hide_index=True,
                              use_container_width=True, column_config=_bbcfg)
 
         with _tabP:
@@ -2514,7 +2554,7 @@ if _mode == "⭐ Superstars":
                     _pv = _buys.sort_values("_dt", ascending=False)[
                         [c for c in ["date", "company", "ticker", "priceN", "current", "pct_since", "days", "exchange"]
                          if c in _buys.columns]]
-                    st.dataframe(_pv, hide_index=True, use_container_width=True, column_config={
+                    st.dataframe(filter_ui(_pv, "ss_perf_since"), hide_index=True, use_container_width=True, column_config={
                         "date": st.column_config.TextColumn("Bought"), "company": st.column_config.TextColumn("Stock"),
                         "ticker": st.column_config.TextColumn("Ticker"),
                         "priceN": st.column_config.NumberColumn("Buy ₹", format="%.1f"),
@@ -2540,7 +2580,7 @@ if _mode == "⭐ Superstars":
                                 "realized_pct": round((_as - _ab) / _ab * 100, 1) if _ab else None,
                                 "days": (_s["_dt"].max() - _b["_dt"].min()).days})
                 if _rt:
-                    st.dataframe(pd.DataFrame(_rt).sort_values("realized_pct", ascending=False),
+                    st.dataframe(filter_ui(pd.DataFrame(_rt).sort_values("realized_pct", ascending=False), "ss_roundtrips"),
                                  hide_index=True, use_container_width=True, column_config={
                         "company": st.column_config.TextColumn("Stock"), "ticker": st.column_config.TextColumn("Ticker"),
                         "avg_buy": st.column_config.NumberColumn("Avg buy ₹", format="%.1f"),
@@ -2557,7 +2597,7 @@ if _mode == "⭐ Superstars":
             else:
                 _a = _bb.sort_values("_dt", ascending=False)
                 st.caption(f"**{len(_a)}** total disclosed bulk/block trades · **Via** = the actual account/entity.")
-                st.dataframe(_a[[c for c in _bbshow if c in _a.columns]], hide_index=True,
+                st.dataframe(filter_ui(_a[[c for c in _bbshow if c in _a.columns]], "ss_bb_all"), hide_index=True,
                              use_container_width=True, column_config=_bbcfg)
 
         with _tabS:
@@ -2570,7 +2610,7 @@ if _mode == "⭐ Superstars":
                     lambda a: "🟢 Buy" if a.startswith("acq") else ("🔴 Sell" if a else "—"))
                 _sc = [c for c in ["trade_dates", "symbol", "company", "move", "pct_traded", "pct_after", "reg_type"]
                        if c in _sv.columns]
-                st.dataframe(_sv[_sc], hide_index=True, use_container_width=True, column_config={
+                st.dataframe(filter_ui(_sv[_sc], "ss_sast"), hide_index=True, use_container_width=True, column_config={
                     "trade_dates": st.column_config.TextColumn("Trade date(s)"),
                     "symbol": st.column_config.TextColumn("NSE symbol"), "company": st.column_config.TextColumn("Company"),
                     "move": st.column_config.TextColumn("Move"),
@@ -2595,7 +2635,7 @@ if _mode == "⭐ Superstars":
                 st.caption(f"**{len(_iv)}** disclosure(s){'' if _all_i else ' in the last 30 days'}.")
                 _ic = [c for c in ["report_date", "company", "person", "category", "action",
                                    "holding_after", "traded_pct", "regulation"] if c in _iv.columns]
-                st.dataframe(_iv[_ic], hide_index=True, use_container_width=True, column_config={
+                st.dataframe(filter_ui(_iv[_ic], "ss_insider"), hide_index=True, use_container_width=True, column_config={
                     "report_date": st.column_config.TextColumn("Reported"), "company": st.column_config.TextColumn("Stock"),
                     "person": st.column_config.TextColumn("Person / entity"), "category": st.column_config.TextColumn("Type"),
                     "action": st.column_config.TextColumn("Action"),
@@ -2743,7 +2783,7 @@ if _mode == "🔔 Alerts":
         _disp["investor"] = _disp["investor"].astype(str).str.title()
         _disp["_d"] = _disp["_dt"].dt.date.astype(str).where(_disp["_dt"].notna(), _disp["date"].astype(str))
         _show = ["_d", "investor", "signal", "source", "side", "stock", "ticker", "exchange", "detail", "conf"]
-        st.dataframe(_disp[[c for c in _show if c in _disp.columns]], hide_index=True,
+        st.dataframe(filter_ui(_disp[[c for c in _show if c in _disp.columns]], "qmoves"), hide_index=True,
                      use_container_width=True, height=460, column_config={
                          "_d": st.column_config.TextColumn("Date"),
                          "investor": st.column_config.TextColumn("Investor"),
@@ -2764,7 +2804,7 @@ if _mode == "🔔 Alerts":
         if not _roll.empty:
             with st.expander(f"🔥 Stocks BOUGHT by ≥2 quality superstars in this window ({len(_roll)})", expanded=True):
                 _roll["latest"] = pd.to_datetime(_roll["latest"], errors="coerce").dt.date.astype(str)
-                st.dataframe(_roll[["stock", "ticker", "investors", "who", "latest"]], hide_index=True,
+                st.dataframe(filter_ui(_roll[["stock", "ticker", "investors", "who", "latest"]], "qm_rollup"), hide_index=True,
                              use_container_width=True, column_config={
                                  "stock": st.column_config.TextColumn("Stock"),
                                  "ticker": st.column_config.TextColumn("Ticker"),
@@ -2792,7 +2832,7 @@ if _mode == "🔔 Alerts":
                    "See exactly who & what changed below. 👇")
         with st.expander(f"📢 Which portfolios updated their quarter ({len(_recent)})", expanded=True):
             _qcols = [c for c in ["name", "prev_quarter", "new_quarter"] if c in _recent.columns]
-            st.dataframe(_recent[_qcols].reset_index(drop=True), hide_index=True, use_container_width=True,
+            st.dataframe(filter_ui(_recent[_qcols].reset_index(drop=True), "quarter_updates"), hide_index=True, use_container_width=True,
                          height=min(380, 70 + 35 * len(_recent)),
                          column_config={
                              "name": st.column_config.TextColumn("Investor"),
@@ -2828,7 +2868,7 @@ if _mode == "🔔 Alerts":
                        ) if _cnt["NEW"] else pd.DataFrame()
             if not _topnew.empty:
                 st.markdown("**🟢 Most-bought NEW positions** (ranked by how many superstars bought in):")
-                st.dataframe(_topnew, hide_index=True, use_container_width=True,
+                st.dataframe(filter_ui(_topnew, "most_bought_new"), hide_index=True, use_container_width=True,
                              column_config={
                                  "ticker": st.column_config.TextColumn("Ticker"),
                                  "company": st.column_config.TextColumn("Company"),
@@ -2854,7 +2894,7 @@ if _mode == "🔔 Alerts":
                           ).reset_index().sort_values("total", ascending=False).reset_index(drop=True))
                 st.markdown(f"**👤 Which superstars changed** — {len(_byinv)} investors disclosed moves this quarter "
                             "(click a column header to sort):")
-                st.dataframe(_byinv, hide_index=True, use_container_width=True, height=320,
+                st.dataframe(filter_ui(_byinv, "by_investor"), hide_index=True, use_container_width=True, height=320,
                              column_config={
                                  "investor": st.column_config.TextColumn("Investor"),
                                  "NEW": st.column_config.NumberColumn("🟢 New", format="%d"),
@@ -2961,7 +3001,7 @@ if _mode == "🔔 Alerts":
                                  "alpha_ann_pct", "ann_return_pct", "max_drawdown_pct",
                                  "score_vs_benchmark", "quarters_tracked"] if c in _qual.columns]
             st.dataframe(
-                _qual[_cols].reset_index(drop=True), hide_index=True, use_container_width=True, height=380,
+                filter_ui(_qual[_cols].reset_index(drop=True), "alert_qual_list"), hide_index=True, use_container_width=True, height=380,
                 column_config={
                     "name": st.column_config.TextColumn("Investor"),
                     "confidence_score": st.column_config.NumberColumn("Conf", format="%d"),
@@ -3247,7 +3287,7 @@ with st.container(border=True):
                          expanded=bool(_jf)):
             _tbl = pd.DataFrame(_rows).drop(columns=["key", "designed"], errors="ignore")
             st.dataframe(
-                _tbl, hide_index=True, use_container_width=True,
+                filter_ui(_tbl, "stock_strategies"), hide_index=True, use_container_width=True,
                 column_config={
                     "Exp profit %": st.column_config.NumberColumn("Exp profit %", format="%.2f%%"),
                     "Exp. days": st.column_config.NumberColumn(
@@ -3379,6 +3419,6 @@ with st.container(border=True):
         st.caption("No historical signals for this ticker / strategy.")
     else:
         show = opps.sort_values("Entry_Date", ascending=False) if "Entry_Date" in opps else opps
-        st.dataframe(show, use_container_width=True, hide_index=True)
+        st.dataframe(filter_ui(show, "indices_summary"), use_container_width=True, hide_index=True)
         st.download_button("⬇️ Download trade log (CSV)", show.to_csv(index=False).encode(),
                            file_name=f"{ticker}_{skey}_trades.csv", mime="text/csv")
