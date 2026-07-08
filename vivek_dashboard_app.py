@@ -2692,6 +2692,26 @@ if _mode == "⭐ Superstars":
                    "*net-worth* changes (contaminated by capital flows) — treat as **directional**, and verify "
                    "any name in **Stock Analysis** before acting.")
 
+    # ---- 🏆 leaderboard — top investors by alpha (visual, from the current filter) ----
+    _lb = view.copy()
+    _lb["_a"] = pd.to_numeric(_lb.get("alpha_ann_pct"), errors="coerce")
+    _lb = _lb.dropna(subset=["_a"]).sort_values("_a", ascending=False).head(15)
+    if len(_lb) >= 2:
+        st.markdown("#### 🏆 Leaderboard — alpha vs Nifty")
+        import plotly.graph_objects as _go
+        _lbr = _lb.iloc[::-1]                                  # highest on top in a horizontal bar
+        _fig = _go.Figure(_go.Bar(
+            x=_lbr["_a"], y=_lbr["name"].astype(str).str.title(), orientation="h",
+            marker=dict(color=_lbr["_a"], colorscale=[[0, "#5C6679"], [1, "#E3B341"]]),
+            text=[f"{v:+.0f}%" for v in _lbr["_a"]], textposition="outside", cliponaxis=False))
+        _fig.update_layout(template="plotly_dark", height=min(520, 70 + 28 * len(_lbr)),
+                           margin=dict(l=8, r=36, t=6, b=8), paper_bgcolor="rgba(0,0,0,0)",
+                           plot_bgcolor="rgba(0,0,0,0)", xaxis_title="Alpha % (annualised, vs Nifty)",
+                           coloraxis_showscale=False)
+        st.plotly_chart(_fig, use_container_width=True, config={"displaylogo": False})
+        st.caption("Alpha = annualised return above Nifty (from net-worth changes — directional). "
+                   "Reflects the filters above.")
+
     _sel = _ev.selection["rows"] if _ev and _ev.selection else []
     if _sel and _sel[0] < len(_disp):
         _row = view.iloc[_sel[0]]                       # positional → exact clicked row (immune to duplicate names)
@@ -2720,6 +2740,30 @@ if _mode == "⭐ Superstars":
             _mc[5].metric("Quarters", _val("quarters_tracked"))
             if _u("interpretation"):
                 st.caption(_u("interpretation"))
+
+        # ---- 🗂️ holdings treemap (current holdings sized by ₹ value) ----
+        _hold_all = _read_fii_tab("superstar_holdings")
+        if not _hold_all.empty and "investor" in _hold_all.columns:
+            _hh = _hold_all[_hold_all["investor"].astype(str).str.lower() == _pick.lower()].copy()
+            _hh["_v"] = pd.to_numeric(_hh.get("value_cr"), errors="coerce")
+            if "move" in _hh.columns:
+                _hh = _hh[~_hh["move"].astype(str).isin(["EXIT", "past", "nan", "None"])]
+            _hh = _hh.dropna(subset=["_v"])
+            _hh = _hh[_hh["_v"] > 0]
+            if len(_hh) >= 2:
+                _hh = _hh.sort_values("_v", ascending=False).head(25)
+                import plotly.express as _px
+                st.markdown("#### 🗂️ Holdings by value")
+                _tf = _px.treemap(_hh, path=[_px.Constant("Portfolio"), "company"], values="_v",
+                                  color="_v", color_continuous_scale=["#2A2F3A", "#8A6D2E", "#E3B341"])
+                _tf.update_layout(template="plotly_dark", height=380, margin=dict(l=4, r=4, t=26, b=4),
+                                  paper_bgcolor="rgba(0,0,0,0)", coloraxis_showscale=False,
+                                  font=dict(family="Inter, sans-serif"))
+                _tf.update_traces(texttemplate="%{label}<br>₹%{value:,.0f} cr", textfont_size=13,
+                                  marker=dict(cornerradius=4), root_color="rgba(0,0,0,0)")
+                st.plotly_chart(_tf, use_container_width=True, config={"displaylogo": False})
+                st.caption(f"Top {len(_hh)} disclosed positions by ₹ value (latest reported quarter). "
+                           "Bigger tile = larger holding.")
 
         # ==== 📊 Deals & performance zone (bulk/block · performance · SAST · insider) ====
         _bb = fetch_superstar_bulkblock()
