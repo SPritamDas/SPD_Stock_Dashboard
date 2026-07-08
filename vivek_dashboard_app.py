@@ -327,6 +327,36 @@ def fetch_ipo_dashboard():
     return _read_fii_tab("ipo_dashboard")
 
 
+@st.cache_data(show_spinner=False, ttl=21600)
+def fetch_portfolio_history_tab():
+    """Per-investor quarterly net-worth series (notebook build_portfolio_history) →
+    the ⭐ investor drill-down 'portfolio vs index' chart."""
+    return _read_fii_tab("superstar_portfolio_history")
+
+
+# benchmark indices for the portfolio-vs-index chart (yfinance symbols; smallcap/midcap are proxies
+# — Yahoo's Nifty index coverage is partial, so the chart falls back to Nifty 50 if one is missing).
+_INDEX_SYMBOLS = {"Nifty 50": "^NSEI", "Nifty Smallcap (proxy)": "^CNXSC",
+                  "Nifty Midcap (proxy)": "^NSEMDCP50", "Sensex": "^BSESN"}
+
+
+@st.cache_data(show_spinner=False, ttl=21600)
+def _index_hist(symbol, start, end):
+    """Daily close for a benchmark index over [start, end] via yfinance → Series (empty on failure)."""
+    try:
+        import yfinance as yf
+        d = yf.download(symbol, start=str(start)[:10], end=str(end)[:10], progress=False, auto_adjust=True)
+        if d is None or d.empty:
+            return pd.Series(dtype=float)
+        s = d["Close"]
+        if hasattr(s, "columns"):
+            s = s.iloc[:, 0]
+        s.index = pd.to_datetime(s.index)
+        return s.dropna()
+    except Exception:
+        return pd.Series(dtype=float)
+
+
 # raw column name -> the SAME friendly label shown in each table's header, so the filter dropdowns
 # read like the columns the user actually sees (not snake_case internals like 'score_vs_benchmark').
 _FILTER_LABELS = {
@@ -2764,6 +2794,50 @@ if _mode == "⭐ Superstars":
                 st.plotly_chart(_tf, use_container_width=True, config={"displaylogo": False})
                 st.caption(f"Top {len(_hh)} disclosed positions by ₹ value (latest reported quarter). "
                            "Bigger tile = larger holding.")
+
+        # ---- 📈 portfolio value vs index ----
+        _ph = fetch_portfolio_history_tab()
+        _pmine = (_ph[_ph["investor"].astype(str).str.lower() == _pick.lower()].copy()
+                  if (not _ph.empty and "investor" in _ph.columns) else pd.DataFrame())
+        if not _pmine.empty:
+            _pmine["_dt"] = pd.to_datetime(_pmine["period_date"], errors="coerce")
+            _pmine["_nw"] = pd.to_numeric(_pmine["net_worth_cr"], errors="coerce")
+            _pmine = _pmine.dropna(subset=["_dt", "_nw"]).sort_values("_dt")
+        if len(_pmine) >= 2:
+            st.markdown("#### 📈 Portfolio value vs index")
+            _bm = st.selectbox("Benchmark", list(_INDEX_SYMBOLS), key=f"bm_{_pick}",
+                               help="Compare growth against an index. Smallcap/Midcap are Yahoo proxies "
+                                    "(partial coverage); falls back to portfolio-only if unavailable.")
+            _pmine["_reb"] = _pmine["_nw"] / _pmine["_nw"].iloc[0] * 100.0
+            import plotly.graph_objects as _go
+            _pfig = _go.Figure()
+            _pfig.add_trace(_go.Scatter(x=_pmine["_dt"], y=_pmine["_reb"], name=_pick.title(),
+                            mode="lines+markers", line=dict(color="#E3B341", width=2.6),
+                            marker=dict(size=4)))
+            _idx = _index_hist(_INDEX_SYMBOLS[_bm], _pmine["_dt"].min(), _pmine["_dt"].max() + pd.Timedelta(days=4))
+            if not _idx.empty:
+                _u = _idx.reindex(_idx.index.union(pd.DatetimeIndex(_pmine["_dt"]))).sort_index().ffill()
+                _bm_at = _u.reindex(pd.DatetimeIndex(_pmine["_dt"]))
+                if _bm_at.dropna().shape[0] >= 2:
+                    _bm_reb = _bm_at / _bm_at.dropna().iloc[0] * 100.0
+                    _pfig.add_trace(_go.Scatter(x=_pmine["_dt"], y=_bm_reb.values, name=_bm,
+                                    mode="lines", line=dict(color="#6AA6FF", width=2, dash="dot")))
+                else:
+                    st.caption(f"_{_bm}: no Yahoo data for this window — showing portfolio only._")
+            else:
+                st.caption(f"_{_bm}: unavailable from Yahoo — showing portfolio only._")
+            _pfig.update_layout(template="plotly_dark", height=360, margin=dict(l=8, r=8, t=10, b=8),
+                                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                legend=dict(orientation="h", y=1.14, x=0),
+                                yaxis=dict(title="Rebased to 100 · log", type="log"))
+            st.plotly_chart(_pfig, use_container_width=True, config={"displaylogo": False})
+            _lastv = _pmine["_reb"].iloc[-1]
+            st.caption(f"Net-worth rebased to 100 at **{_pmine['_dt'].iloc[0].date()}** → **{_lastv:.0f}** now "
+                       f"({_lastv - 100:+.0f}%). Net-worth includes capital added/withdrawn, so read as "
+                       "directional, not a pure return.")
+        elif _pmine.empty:
+            st.caption("📈 A **portfolio-vs-index** chart appears here once the notebook's "
+                       "`build_portfolio_history` step has run (it stores each investor's net-worth series).")
 
         # ==== 📊 Deals & performance zone (bulk/block · performance · SAST · insider) ====
         _bb = fetch_superstar_bulkblock()
