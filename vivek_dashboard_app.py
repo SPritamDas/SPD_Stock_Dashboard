@@ -828,6 +828,7 @@ def _open_in_strategy(ticker, skey, from_index):
     """Jump from the index page straight into Stock Analysis for `ticker`, preselecting `skey`
     (the Strategy dropdown reads st.session_state.strat_sel)."""
     st.session_state.sel_ticker = ticker
+    st.session_state.ticker_pick = ticker            # keep the sidebar picker in sync
     st.session_state.user_picked = True
     _nav_to_stocks()
     st.session_state.setdefault("extra_tickers", set()).add(ticker)
@@ -839,6 +840,7 @@ def _open_stock(ticker, from_label):
     """Open `ticker` in Stock Analysis (keeps the current strategy) — e.g. from a superstar's
     holding. Runs as a button on_click, so app_mode is set before any widget is instantiated."""
     st.session_state.sel_ticker = ticker
+    st.session_state.ticker_pick = ticker            # keep the sidebar picker in sync
     st.session_state.user_picked = True
     _nav_to_stocks()
     st.session_state.setdefault("extra_tickers", set()).add(ticker)
@@ -1701,6 +1703,7 @@ groups = get_groups(cache)
 _goto = st.query_params.get("open")
 if _goto:
     st.session_state.sel_ticker = _goto
+    st.session_state.ticker_pick = _goto             # keep the sidebar picker in sync
     st.session_state.user_picked = True
     _nav_to_stocks()
     st.session_state.setdefault("extra_tickers", set()).add(_goto)
@@ -2142,6 +2145,7 @@ if _mode == "🌐 Indices":
                     _s = st.session_state.get("idx_jump")
                     if _s and _s != "— pick a company —":
                         st.session_state.sel_ticker = _s
+                        st.session_state.ticker_pick = _s        # keep the sidebar picker in sync
                         st.session_state.user_picked = True
                         _nav_to_stocks()
                         st.session_state.setdefault("extra_tickers", set()).add(_s)
@@ -3240,31 +3244,44 @@ if "sel_ticker" not in st.session_state or st.session_state.sel_ticker not in al
     st.session_state.sel_ticker = sorted(
         allowed, key=lambda t: (_rank(t), -exp_map.get(t, -1e9), t))[0]
 
-# ---- sidebar: colour-coded ticker grid (green = buy now, red = not) ----
-clicked = None
-with st.sidebar:
-    st.markdown("**Tickers** — 🟢 buy now · 🔴 not now"
-                + (" · 🟡 review" if any(s.startswith("🟡") for s in status_map.values()) else "")
-                + ("" if cache else "  _(build cache to colour)_"))
-    for tab, col in zip(st.tabs([GLABEL.get(c, c) for c in tab_cols]), tab_cols):
-        with tab:
-            items = sorted(set(groups.get(col, [])),
-                           key=lambda t: (_rank(t), -exp_map.get(t, -1e9), t))
-            gc = st.columns(2)
-            for i, t in enumerate(items):
-                with gc[i % 2]:
-                    mark = "▶ " if t == st.session_state.sel_ticker else ""
-                    if st.button(f"{mark}{_dot(t)} {t}", key=f"{_pfx(t)}{col}__{t}",
-                                 use_container_width=True):
-                        clicked = t
+# ---- sidebar: searchable ticker picker (🟢 buy-now first) — replaces the old ~200-button grid ----
+def _pick_ticker():
+    _p = st.session_state.get("ticker_pick")
+    if _p and _p in allowed:
+        st.session_state.sel_ticker = _p
+        st.session_state.user_picked = True
+        st.session_state.pop("jumped_from", None)     # an explicit pick clears the "from index" banner
 
-# capture the click only after the whole grid is drawn, then rerun so the ▶
-# marker and the main panel both render against one consistent selection
-if clicked is not None:
-    st.session_state.sel_ticker = clicked
-    st.session_state.user_picked = True
-    st.session_state.pop("jumped_from", None)        # a grid click clears the "from index" banner
-    st.rerun()
+def _tier_str(t):
+    return " · ".join(GLABEL.get(g, g) for g in _groups_of(t)) or "All-NSE"
+
+with st.sidebar:
+    _buynow = st.toggle("🟢 Ready-to-buy only", value=True, key="buynow_only",
+                        help="Show only the stocks this strategy rates 🟢 READY right now. "
+                             "Turn off to search the whole list.")
+    _tier_opts = [GLABEL.get(c, c) for c in tab_cols]
+    _tier_sel = st.multiselect("Limit to tier", _tier_opts, default=[], key="tier_filter",
+                               help="V40 / V40-N / V200. Leave empty for all.") if len(_tier_opts) > 1 else []
+    _opts = sorted(allowed, key=lambda t: (_rank(t), -exp_map.get(t, -1e9), t))
+    if _tier_sel:
+        _opts = [t for t in _opts if set(_tier_str(t).split(" · ")) & set(_tier_sel)]
+    if _buynow:
+        _ready = [t for t in _opts if _pfx(t) == "rdy_"]
+        if _ready:
+            _opts = _ready
+        else:
+            st.caption("_No 🟢 READY names match — showing all (toggle off to keep browsing)._")
+    _cur = st.session_state.get("sel_ticker")
+    if _cur in allowed and _cur not in _opts:            # keep the current pick selectable even if filtered out
+        _opts = [_cur] + _opts
+    if not _opts:
+        _opts = sorted(allowed)
+    st.selectbox("🔎 Pick a stock (type to search)", _opts,
+                 index=(_opts.index(_cur) if _cur in _opts else 0),
+                 format_func=lambda t: f"{_dot(t)} {t}  ·  {_tier_str(t)}",
+                 key="ticker_pick", on_change=_pick_ticker)
+    st.caption(f"{len(_opts)} shown · 🟢 buy now · 🟡 review · 🔴 not now"
+               + ("" if cache else "  _(build cache to colour)_"))
 
 ticker = st.session_state.sel_ticker
 
