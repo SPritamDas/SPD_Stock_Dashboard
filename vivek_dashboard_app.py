@@ -1963,7 +1963,7 @@ with st.sidebar:
                         captions=["Look up any stock or index", "What to buy",
                                   "What the big money is doing", "The macro tape"])
     _subs = _SUBVIEWS[_section]
-    _sub = st.radio("View", [lbl for lbl, _m in _subs], horizontal=True, key=_SUBKEY[_section])
+    _sub = st.radio("View", [lbl for lbl, _m in _subs], key=_SUBKEY[_section])
     _mode = dict(_subs).get(_sub, _subs[0][1])
 st.session_state["app_mode"] = _mode      # keep the legacy key in sync for any residual reader
 
@@ -3659,8 +3659,13 @@ if _mode == "🌍 Reports":
                      "kind": st.column_config.TextColumn("Type"),
                      "trendlyne_url": st.column_config.LinkColumn("Trendlyne", display_text="view"),
                      "pdf": st.column_config.LinkColumn("PDF", display_text="open")})
-    st.caption("Source: [Trendlyne research reports](https://trendlyne.com/research-reports/all/) "
-               "(scraped). Click **view** to open the report on Trendlyne, **open** for the PDF.")
+    st.caption("Sources on Trendlyne (scraped): "
+               "[Buy](https://trendlyne.com/research-reports/buy/) · "
+               "[Highest upside](https://trendlyne.com/research-reports/upside/) · "
+               "[All](https://trendlyne.com/research-reports/all/) · "
+               "[Recent upgrades](https://trendlyne.com/research-reports/recent-upgrades/) · "
+               "[Recent downgrades](https://trendlyne.com/research-reports/recent-downgrades/). "
+               "In-table: **view** = the report on Trendlyne, **open** = the PDF.")
     st.stop()
 
 if _mode == "🌍 Today":
