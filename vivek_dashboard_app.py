@@ -315,37 +315,67 @@ def fetch_market_bulkblock():
     return _read_fii_tab("market_bulkblock_deals")
 
 
+# raw column name -> the SAME friendly label shown in each table's header, so the filter dropdowns
+# read like the columns the user actually sees (not snake_case internals like 'score_vs_benchmark').
+_FILTER_LABELS = {
+    "_d": "Date", "date": "Date", "conf": "Match", "source": "Via", "detail": "Details",
+    "investor": "Investor", "name": "Investor", "signal": "Signal", "type": "Type",
+    "side": "Side", "action": "Side", "move": "Move", "stock": "Stock", "company": "Company",
+    "ticker": "Ticker", "symbol": "Symbol", "client": "Client", "entity": "Via (account/entity)",
+    "exchange": "Exchange", "deal_type": "Deal type", "qty": "Qty", "price": "Price ₹",
+    "pct_traded": "% of company", "pct_after": "Holding after %", "holding_after": "Holding after %",
+    "traded_pct": "% traded", "reg_type": "Regulation", "regulation": "Regulation", "person": "Person",
+    "category": "Category", "confidence_score": "Conf", "sharpe_ratio": "Sharpe",
+    "alpha_ann_pct": "Alpha %", "ann_return_pct": "Ann ret %", "max_drawdown_pct": "Max DD %",
+    "score_vs_benchmark": "Rank score", "quarters_tracked": "Quarters", "current_net_worth_cr": "Net worth ₹Cr",
+    "prev_quarter": "Was", "new_quarter": "Now", "investors": "# investors", "who": "Who",
+    "latest": "Latest buy", "avg_stake": "Avg stake %", "value_cr": "Value ₹Cr", "total": "Total",
+    "trade_dates": "Trade dates", "filed": "Filed", "report_date": "Reported",
+}
+
+
+def _flabel(c):
+    """Friendly display name for a raw column (falls back to the column name itself)."""
+    return _FILTER_LABELS.get(str(c), str(c))
+
+
 def filter_ui(df, key, *, label="🔎 Filter columns"):
-    """Reusable, collapsed-by-default per-column filter for ANY table. Renders a small popover button;
+    """Reusable, collapsed-by-default per-column filter for ANY table. Renders an expander;
     returns the filtered DataFrame (call st.dataframe on the result). Adds column filtering everywhere
-    WITHOUT cluttering the default view — the widgets live inside the popover.
+    WITHOUT cluttering the default view — the widgets live inside the collapsed expander. Column names
+    are shown with their friendly labels (see _FILTER_LABELS) so they match the table headers.
       · numeric column (mostly numbers, many distinct)  -> min/max range slider
       · categorical (≤ 40 distinct values)              -> multiselect
       · anything else (free text / high-cardinality)    -> 'contains' text box
     Each table must pass a UNIQUE `key` (seeds the widget keys)."""
     if df is None or getattr(df, "empty", True) or len(df.columns) == 0:
         return df
-    with st.popover(label):
+    # inline expander (not st.popover): renders full-width so the value dropdowns have room and never
+    # clip the way a narrow floating popover does; still collapsed by default = no clutter.
+    with st.expander(label, expanded=False):
         pick = st.multiselect("Pick column(s) to filter", list(df.columns), key=f"{key}__cols",
+                              format_func=_flabel,
                               help="Choose one or more columns, then set the value/range to filter on.")
         out = df
         for c in pick:
             s = df[c]
-            wkey = f"{key}__{c}"
+            if isinstance(s, pd.DataFrame):        # guard against duplicate column labels
+                s = s.iloc[:, 0]
+            wkey, clabel = f"{key}__{c}", _flabel(c)
             snum = pd.to_numeric(s, errors="coerce")
             nunq = int(s.nunique(dropna=True))
             if snum.notna().mean() >= 0.8 and nunq >= 5:                       # numeric (%, price, days…) → range slider
                 lo, hi = float(snum.min()), float(snum.max())
                 if lo < hi:
-                    a, b = st.slider(str(c), lo, hi, (lo, hi), key=wkey)
+                    a, b = st.slider(clabel, lo, hi, (lo, hi), key=wkey)
                     out = out[pd.to_numeric(out[c], errors="coerce").between(a, b)]
             elif 0 < nunq <= 40:                                               # categorical / few-valued → multiselect
                 opts = sorted(map(str, s.dropna().unique()))
-                sel = st.multiselect(str(c), opts, key=wkey)
+                sel = st.multiselect(clabel, opts, key=wkey)
                 if sel:
                     out = out[out[c].astype(str).isin(sel)]
             else:                                                              # text → contains
-                q = st.text_input(f"{c} contains", key=wkey).strip()
+                q = st.text_input(f"{clabel} contains", key=wkey).strip()
                 if q:
                     out = out[out[c].astype(str).str.contains(q, case=False, na=False, regex=False)]
     if len(out) != len(df):
