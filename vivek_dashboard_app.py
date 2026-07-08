@@ -328,6 +328,12 @@ def fetch_ipo_dashboard():
 
 
 @st.cache_data(show_spinner=False, ttl=21600)
+def fetch_research_reports():
+    """Broker research reports (notebook build_research_reports) → Markets → Reports."""
+    return _read_fii_tab("research_reports")
+
+
+@st.cache_data(show_spinner=False, ttl=21600)
 def fetch_portfolio_history_tab():
     """Per-investor quarterly net-worth series (notebook build_portfolio_history) →
     the ⭐ investor drill-down 'portfolio vs index' chart."""
@@ -1948,7 +1954,8 @@ _SUBVIEWS = {
     "📊 Analyze":  [("📈 Stocks", "📊 Stocks"), ("🌐 Indices", "🌐 Indices")],
     "💡 Ideas":    [("🎯 Buy setups", "💎 Investable now"), ("💰 Size a budget", "💡 Allocate ₹")],
     "⭐ Investors": [("📋 Investor list", "⭐ Superstars"), ("🔔 Recent moves", "🔔 Alerts")],
-    "🌍 Markets":  [("📅 Today", "🌍 Today"), ("📉 FII/DII flow", "🌍 FII/DII"), ("🚀 IPOs", "🌍 IPOs")],
+    "🌍 Markets":  [("📅 Today", "🌍 Today"), ("📉 FII/DII flow", "🌍 FII/DII"),
+                    ("🚀 IPOs", "🌍 IPOs"), ("📑 Reports", "🌍 Reports")],
 }
 _SUBKEY = {"📊 Analyze": "nav_analyze", "💡 Ideas": "nav_ideas", "⭐ Investors": "nav_investors", "🌍 Markets": "nav_markets"}
 with st.sidebar:
@@ -1964,7 +1971,8 @@ st.session_state["app_mode"] = _mode      # keep the legacy key in sync for any 
 st.title("📈 SPritamDas — " + {"🌐 Indices": "Index Analysis", "⭐ Superstars": "Superstar Analysis",
                                 "🔔 Alerts": "FII/DII Alerts", "💎 Investable now": "Investable Now",
                                 "💡 Allocate ₹": "Suggest & Allocate", "🌍 Today": "Markets Today",
-                                "🌍 FII/DII": "FII / DII Flow", "🌍 IPOs": "IPO Dashboard"}.get(_mode, "Stock Analysis"))
+                                "🌍 FII/DII": "FII / DII Flow", "🌍 IPOs": "IPO Dashboard",
+                                "🌍 Reports": "Broker Research Reports"}.get(_mode, "Stock Analysis"))
 render_floating_calculator()   # 🧮 draggable, always-on-top calculator (hovers over the chart)
 render_floating_notes()        # 📒 draggable, always-on-top notes (context-aware, persists in the browser)
 
@@ -3586,6 +3594,51 @@ if _mode == "🌍 IPOs":
                "moves daily and can vanish at listing. Use only as a sentiment gauge.")
     st.stop()
 
+if _mode == "🌍 Reports":
+    st.markdown("## 📑 Broker research reports")
+    _rr = fetch_research_reports()
+    if _rr.empty or "symbol" not in _rr.columns:
+        st.info("No research reports yet — run the notebook (`build_research_reports`).")
+        st.stop()
+    _rr = _rr.copy()
+    _rr["upside_pct"] = pd.to_numeric(_rr["upside_pct"], errors="coerce")
+    st.caption("Latest sell-side **broker calls** — target price, upside vs current, and recent "
+               "**upgrades / downgrades** (Trendlyne). Broker opinions, not advice.")
+    _fc = st.columns([2, 2, 3])
+    _kind = _fc[0].multiselect("Type", sorted(_rr["kind"].dropna().astype(str).unique()), key="rr_kind",
+                               help="high-upside · report · upgrade · downgrade")
+    _brk = _fc[1].multiselect("Broker", sorted(_rr["broker"].dropna().astype(str).unique()), key="rr_brk")
+    _q = _fc[2].text_input("🔎 Search stock", key="rr_q").strip().lower()
+    v = _rr
+    if _kind:
+        v = v[v["kind"].astype(str).isin(_kind)]
+    if _brk:
+        v = v[v["broker"].astype(str).isin(_brk)]
+    if _q:
+        v = v[v["name"].astype(str).str.lower().str.contains(_q, na=False)
+              | v["symbol"].astype(str).str.lower().str.contains(_q, na=False)]
+    v = v.sort_values("upside_pct", ascending=False, na_position="last").reset_index(drop=True)
+    _m = st.columns(3)
+    _m[0].metric("Reports shown", len(v))
+    _m[1].metric("Recent upgrades", int((_rr["kind"] == "upgrade").sum()))
+    _m[2].metric("Recent downgrades", int((_rr["kind"] == "downgrade").sum()))
+    if not v.empty and v["upside_pct"].notna().any():
+        _b = v.loc[v["upside_pct"].idxmax()]
+        st.success(f"🏆 Highest broker upside here: **{_b['name']} ({_b['symbol']})** — {_b['broker']} "
+                   f"target ₹{_b['target']} · **+{_b['upside_pct']:.0f}%**")
+    _show = ["symbol", "name", "broker", "call", "target", "upside_pct", "kind", "pdf"]
+    st.dataframe(filter_ui(v[[c for c in _show if c in v.columns]], "rr_tbl"), hide_index=True,
+                 use_container_width=True, height=520, column_config={
+                     "symbol": st.column_config.TextColumn("Symbol"),
+                     "name": st.column_config.TextColumn("Stock", width="medium"),
+                     "broker": st.column_config.TextColumn("Broker"),
+                     "call": st.column_config.TextColumn("Call"),
+                     "target": st.column_config.TextColumn("Target ₹"),
+                     "upside_pct": st.column_config.NumberColumn("Upside %", format="%.1f%%"),
+                     "kind": st.column_config.TextColumn("Type"),
+                     "pdf": st.column_config.LinkColumn("PDF", display_text="open")})
+    st.stop()
+
 if _mode == "🌍 Today":
     st.markdown("## 📅 Markets today — the tape at a glance")
     # -- index snapshot (day change) --
@@ -3630,6 +3683,21 @@ if _mode == "🌍 Today":
                          "detail": st.column_config.TextColumn("Details", width="large")})
     else:
         st.caption("No quality-superstar moves on record yet.")
+    # -- top broker calls (research insight) --
+    _rr = fetch_research_reports()
+    if not _rr.empty and "upside_pct" in _rr.columns:
+        _rr = _rr.copy()
+        _rr["upside_pct"] = pd.to_numeric(_rr["upside_pct"], errors="coerce")
+        _rt = _rr[_rr["upside_pct"].notna()].sort_values("upside_pct", ascending=False).head(8)
+        if not _rt.empty:
+            st.markdown("#### 📑 Top broker calls — highest upside")
+            st.dataframe(_rt[[c for c in ["symbol", "name", "broker", "target", "upside_pct", "kind"] if c in _rt.columns]],
+                         hide_index=True, use_container_width=True, height=300, column_config={
+                             "symbol": st.column_config.TextColumn("Symbol"), "name": st.column_config.TextColumn("Stock"),
+                             "broker": st.column_config.TextColumn("Broker"), "target": st.column_config.TextColumn("Target ₹"),
+                             "upside_pct": st.column_config.NumberColumn("Upside %", format="%.1f%%"),
+                             "kind": st.column_config.TextColumn("Type")})
+            st.caption("Full list + recent upgrades / downgrades in **Markets → 📑 Reports**.")
     _mkt = fetch_market_bulkblock()
     if not _mkt.empty and "symbol" in _mkt.columns:
         _mkt = _mkt.copy()
