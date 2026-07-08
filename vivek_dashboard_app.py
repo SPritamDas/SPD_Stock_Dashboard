@@ -353,8 +353,9 @@ def build_quality_moves(days=None):
         return f"{int(n):,}" if pd.notna(n) else str(v)
 
     def _mine(df):
-        return (df is not None and not df.empty and "investor" in df.columns
-                and df[df["investor"].astype(str).str.strip().str.lower().isin(qnames)].copy()) or pd.DataFrame()
+        if df is None or df.empty or "investor" not in df.columns:
+            return pd.DataFrame()
+        return df[df["investor"].astype(str).str.strip().str.lower().isin(qnames)].copy()
 
     rows = []
     # --- bulk & block (already spans NSE + BSE via the exchange column) ---
