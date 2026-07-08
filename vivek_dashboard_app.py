@@ -1681,12 +1681,7 @@ def render_chart_block(a, key, extend_proj=False, macro=None):
 # UI
 # ============================================================================
 st.markdown("""<style>
-  section[data-testid="stSidebar"] div[class*="st-key-rdy_"] button{background:#1b8f4d;color:#fff;border:1px solid #14633a;}
-  section[data-testid="stSidebar"] div[class*="st-key-rev_"] button{background:#caa10a;color:#111;border:1px solid #8a6d00;}
-  section[data-testid="stSidebar"] div[class*="st-key-not_"] button{background:#b03a2e;color:#fff;border:1px solid #7d2820;}
-  section[data-testid="stSidebar"] div[class*="st-key-neu_"] button{background:#3a3f44;color:#eee;border:1px solid #555;}
-  section[data-testid="stSidebar"] div[class*="st-key-"] button{padding:1px 5px;font-size:0.72rem;min-height:0;line-height:1.5;}
-  /* main-area strategy buttons (constituent table) — coloured by current READY status */
+  /* main-area strategy buttons (constituent table + ticker profile) — coloured by READY status */
   div[class*="st-key-sgrdy_"] button{background:#1b8f4d;color:#fff;border:1px solid #14633a;}
   div[class*="st-key-sgrev_"] button{background:#caa10a;color:#111;border:1px solid #8a6d00;}
   div[class*="st-key-sgnot_"] button{background:#b03a2e;color:#fff;border:1px solid #7d2820;}
@@ -1694,6 +1689,156 @@ st.markdown("""<style>
   .cwrap{display:flex;flex-wrap:wrap;gap:5px;margin-top:4px;}
   .cchip{background:#262b31;color:#dfe3e8;border:1px solid #3a4048;border-radius:6px;
          padding:2px 8px;font-size:0.70rem;font-family:ui-monospace,Menlo,monospace;white-space:nowrap;}
+</style>""", unsafe_allow_html=True)
+
+# ── "Aurum Terminal" premium polish — paint-only, stable selectors; injected AFTER the status-button
+#    block above so the semantic green/amber/red status colours always win on any tie. ──
+st.markdown("""<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap');
+
+:root{
+  color-scheme: dark;
+  --spd-bg:#0C0D10; --spd-elev:#14161B; --spd-elev-2:#191C22;
+  --spd-gold:#E3B341; --spd-gold-hi:#F6D98A;
+  --spd-gold-soft:rgba(227,179,65,0.12); --spd-gold-line:rgba(227,179,65,0.38);
+  --spd-line:#23262D; --spd-text:#ECEEF2; --spd-text-strong:#F5F6F8; --spd-muted:#8B929C;
+}
+
+/* typography + crisp tabular numerics */
+html, body,
+[data-testid="stAppViewContainer"],
+[data-testid="stSidebar"]{
+  font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  font-variant-numeric:tabular-nums; font-feature-settings:"tnum" 1;
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+}
+[data-testid="stAppViewContainer"] h1{
+  font-family:'Plus Jakarta Sans','Inter',sans-serif;
+  font-weight:800; letter-spacing:-.025em; line-height:1.12; color:var(--spd-text-strong);
+}
+[data-testid="stAppViewContainer"] h2,
+[data-testid="stAppViewContainer"] h3{
+  font-family:'Plus Jakarta Sans','Inter',sans-serif;
+  font-weight:700; letter-spacing:-.015em; color:var(--spd-text-strong);
+}
+[data-testid="stAppViewContainer"] h4,
+[data-testid="stAppViewContainer"] h5,
+[data-testid="stAppViewContainer"] h6{ font-weight:600; letter-spacing:-.008em; }
+[data-testid="stCaptionContainer"]{ color:var(--spd-muted); }
+::selection{ background:rgba(227,179,65,.28); color:#fff; }
+
+/* app canvas: barely-there gold/blue depth (paint only) */
+[data-testid="stAppViewContainer"]{
+  background-image:
+    radial-gradient(1200px 480px at 80% -10%, rgba(227,179,65,.06), transparent 60%),
+    radial-gradient(900px 520px at 0% 0%, rgba(88,116,168,.05), transparent 55%);
+}
+[data-testid="stMainBlockContainer"]{ padding-bottom:4.5rem; }
+
+/* top header: translucent, blurred */
+[data-testid="stHeader"]{
+  background:rgba(12,13,16,.72);
+  backdrop-filter:blur(10px) saturate(120%); -webkit-backdrop-filter:blur(10px) saturate(120%);
+  border-bottom:1px solid var(--spd-line);
+}
+
+/* cards: st.container(border=True) */
+[data-testid="stVerticalBlockBorderWrapper"]{
+  background:linear-gradient(180deg, rgba(255,255,255,.022), rgba(255,255,255,0) 42%), var(--spd-elev);
+  border:1px solid var(--spd-line); border-radius:.7rem;
+  box-shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 10px 28px -22px rgba(0,0,0,.95);
+}
+
+/* metric tiles */
+[data-testid="stMetric"]{
+  position:relative; overflow:hidden;
+  background:linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,0) 55%), var(--spd-elev-2);
+  border:1px solid var(--spd-line); border-radius:.65rem; padding:.85rem 1rem .9rem 1.05rem;
+  transition:border-color .18s ease, box-shadow .18s ease;
+}
+[data-testid="stMetric"]::before{
+  content:""; position:absolute; left:0; top:0; bottom:0; width:2px;
+  background:linear-gradient(180deg,var(--spd-gold),rgba(227,179,65,0)); opacity:.55;
+}
+[data-testid="stMetric"]:hover{ border-color:var(--spd-gold-line); box-shadow:0 12px 30px -22px rgba(0,0,0,.95); }
+[data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p{
+  color:var(--spd-muted); font-size:.72rem; font-weight:600; letter-spacing:.06em; text-transform:uppercase;
+}
+[data-testid="stMetricValue"]{ color:var(--spd-text-strong); font-weight:700; letter-spacing:-.01em; font-variant-numeric:tabular-nums; }
+[data-testid="stMetricDelta"]{ font-weight:600; font-variant-numeric:tabular-nums; }
+
+/* sidebar shell + radio navigation → nav pills */
+[data-testid="stSidebar"]{ border-right:1px solid var(--spd-line); }
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] label{
+  color:var(--spd-muted); font-weight:700; font-size:.7rem; letter-spacing:.10em; text-transform:uppercase;
+}
+[data-testid="stSidebar"] [role="radiogroup"]{ gap:.15rem; }
+[data-testid="stSidebar"] [role="radiogroup"] label{
+  border:1px solid transparent; border-radius:.55rem; padding:.4rem .6rem; margin:2px 0;
+  transition:background .15s ease, border-color .15s ease; cursor:pointer;
+}
+[data-testid="stSidebar"] [role="radiogroup"] label:hover{ background:rgba(255,255,255,.045); }
+[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked){ background:var(--spd-gold-soft); border-color:var(--spd-gold-line); }
+[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) div{ color:#F4E7C2; }
+
+/* expanders */
+[data-testid="stExpander"]{
+  border:1px solid var(--spd-line); border-radius:.6rem; overflow:hidden;
+  background:var(--spd-elev); margin-bottom:.4rem; transition:border-color .18s ease;
+}
+[data-testid="stExpander"]:hover{ border-color:var(--spd-gold-line); }
+[data-testid="stExpander"] summary{ padding:.7rem .9rem; font-weight:600; color:#E7E9ED; transition:background .15s ease, color .15s ease; }
+[data-testid="stExpander"] summary:hover{ background:rgba(255,255,255,.035); color:var(--spd-gold-hi); }
+[data-testid="stExpander"] summary svg{ color:var(--spd-muted); transition:color .15s ease; }
+[data-testid="stExpander"] summary:hover svg{ color:var(--spd-gold); }
+
+/* buttons — generic rules never set bg/color (status colours win); hover via brightness; only primary→gold */
+[data-testid="stButton"] button,
+[data-testid="stDownloadButton"] button,
+[data-testid="stFormSubmitButton"] button{
+  border-radius:.55rem; font-weight:600; letter-spacing:.01em;
+  transition:transform .06s ease, filter .18s ease, box-shadow .18s ease;
+}
+[data-testid="stButton"] button:hover,
+[data-testid="stDownloadButton"] button:hover,
+[data-testid="stFormSubmitButton"] button:hover{ filter:brightness(1.08); box-shadow:0 8px 20px -14px rgba(0,0,0,.85); }
+[data-testid="stButton"] button:active{ transform:translateY(1px); }
+[data-testid="stButton"] button[kind="primary"],
+[data-testid="stFormSubmitButton"] button[kind="primary"],
+[data-testid="stBaseButton-primary"]{
+  background:linear-gradient(180deg,#EAC45C,#DCA935); color:#191408; border:1px solid #B98F1F;
+  box-shadow:0 8px 20px -12px rgba(227,179,65,.55);
+}
+
+/* tabs */
+[data-testid="stTabs"] [data-baseweb="tab-list"]{ gap:.3rem; border-bottom:1px solid var(--spd-line); }
+[data-testid="stTabs"] [data-baseweb="tab"]{ padding:.5rem .9rem; border-radius:.5rem .5rem 0 0; color:var(--spd-muted); font-weight:600; transition:color .15s ease, background .15s ease; }
+[data-testid="stTabs"] [data-baseweb="tab"]:hover{ color:var(--spd-text); background:rgba(255,255,255,.03); }
+[data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"]{ color:var(--spd-gold-hi); }
+[data-testid="stTabs"] [data-baseweb="tab-highlight"]{ background:var(--spd-gold) !important; height:2px; }
+
+/* dataframes */
+[data-testid="stDataFrame"]{ border:1px solid var(--spd-line); border-radius:.6rem; overflow:hidden; box-shadow:0 10px 28px -24px rgba(0,0,0,.95); }
+
+/* inputs: gold focus ring + gold multiselect chips */
+div[data-baseweb="input"]:focus-within,
+div[data-baseweb="base-input"]:focus-within,
+div[data-baseweb="select"] > div:focus-within,
+div[data-baseweb="textarea"]:focus-within{ border-color:var(--spd-gold-line) !important; box-shadow:0 0 0 3px var(--spd-gold-soft) !important; }
+[data-testid="stMultiSelect"] span[data-baseweb="tag"]{ background:var(--spd-gold-soft); border:1px solid var(--spd-gold-line); color:#F4E7C2; }
+
+/* dividers */
+[data-testid="stAppViewContainer"] hr{ border:none; height:1px; margin:1.1rem 0; background:linear-gradient(90deg, transparent, var(--spd-line) 18%, var(--spd-line) 82%, transparent); }
+
+/* links */
+[data-testid="stMarkdownContainer"] a{ text-decoration-thickness:1px; text-underline-offset:2px; }
+
+/* premium thin scrollbars */
+*::-webkit-scrollbar{ width:10px; height:10px; }
+*::-webkit-scrollbar-track{ background:transparent; }
+*::-webkit-scrollbar-thumb{ background:#2A2E36; border-radius:8px; border:2px solid var(--spd-bg); }
+*::-webkit-scrollbar-thumb:hover{ background:#3A3F49; }
 </style>""", unsafe_allow_html=True)
 
 cache = load_cache()
