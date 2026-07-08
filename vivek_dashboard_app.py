@@ -326,9 +326,11 @@ def _quality_meta(summ):
     sig = summ.get("signal", pd.Series(index=summ.index, dtype=object)).astype(str)
     qual = sig.isin(["STRONG BUY", "BUY"]) & (sh >= 0.4) & (dd >= -40)
     out = {}
+    has_type = "type" in summ.columns
     for i in summ.index[qual.fillna(False)]:
         out[str(summ.at[i, "name"]).strip().lower()] = {
-            "signal": sig.at[i], "alpha": al.at[i], "sharpe": sh.at[i], "maxdd": dd.at[i]}
+            "signal": sig.at[i], "alpha": al.at[i], "sharpe": sh.at[i], "maxdd": dd.at[i],
+            "type": str(summ.at[i, "type"]) if has_type else ""}
     return out
 
 
@@ -403,6 +405,7 @@ def build_quality_moves(days=None):
     d["_dt"] = pd.to_datetime(d["date"].astype(str).str.strip(), format="mixed", errors="coerce")
     d["signal"] = d["investor"].map(lambda x: meta.get(str(x).strip().lower(), {}).get("signal", ""))
     d["alpha"] = d["investor"].map(lambda x: meta.get(str(x).strip().lower(), {}).get("alpha"))
+    d["type"] = d["investor"].map(lambda x: meta.get(str(x).strip().lower(), {}).get("type", ""))
     d = d.drop_duplicates(subset=["investor", "ticker", "_dt", "side", "source", "detail"])
     if days:
         _cut = pd.Timestamp.now().normalize() - pd.Timedelta(days=int(days))
@@ -2335,11 +2338,14 @@ if _mode == "⭐ Superstars":
     # ---- filters (combine with AND; numeric ones apply only when you enter a value) ----
     def _ncol(df, c):
         return pd.to_numeric(df[c], errors="coerce") if c in df.columns else pd.Series(float("nan"), index=df.index)
-    _f1 = st.columns([3, 3])
+    _f1 = st.columns([3, 3, 2])
     _q = _f1[0].text_input("🔎 Search investor", key="sstar_q").strip().lower()
     _sig_present = [s for s in ["STRONG BUY", "BUY", "WATCH", "HOLD", "AVOID"]
                     if "signal" in _sdf.columns and s in set(_sdf["signal"].astype(str))]
     _sigs = _f1[1].multiselect("Signal (any of)", _sig_present, key="sstar_sig")
+    _type_present = sorted(_sdf["type"].dropna().astype(str).unique()) if "type" in _sdf.columns else []
+    _types = _f1[2].multiselect("Type", _type_present, key="sstar_type",
+                                help="Individual investor (guru) vs institutional (fund/AMC).")
     _f2 = st.columns(4)
     _minsh = _f2[0].number_input("Min Sharpe", value=None, step=0.1, format="%.2f", key="sstar_minsh",
                                  placeholder="—")
@@ -2352,6 +2358,8 @@ if _mode == "⭐ Superstars":
         view = view[view["name"].astype(str).str.lower().str.contains(_q, na=False)]
     if _sigs and "signal" in view.columns:
         view = view[view["signal"].astype(str).isin(_sigs)]
+    if _types and "type" in view.columns:
+        view = view[view["type"].astype(str).isin(_types)]
     if _minsh is not None:
         view = view[_ncol(view, "sharpe_ratio") >= _minsh]
     if _minal is not None:
@@ -2699,19 +2707,24 @@ if _mode == "🔔 Alerts":
                    "quality bar (**signal BUY/STRONG BUY · Sharpe ≥ 0.4 · Max DD ≥ −40**), newest first — so you never "
                    "open each portfolio. Bulk/block covers **both exchanges**; SAST is NSE Reg 29; insider is PIT/SAST "
                    f"(a Reg-29 crossing can appear under both **SAST** and **Insider**). Quality names: {_qnames_disp}")
-        _fc = st.columns([2, 2, 2, 2, 3])
+        _fc = st.columns([2, 2, 2, 2, 2, 3])
         _win = _fc[0].selectbox("Window", ["30d", "60d", "90d", "180d", "All"], index=3, key="qm_win")
         _srcs = _fc[1].multiselect("Source", sorted(_qm["source"].dropna().unique()), key="qm_src")
-        _sides = _fc[2].multiselect("Side", ["BUY", "SELL"], key="qm_side")
+        _typopts = sorted(x for x in _qm["type"].dropna().astype(str).unique() if x.strip())
+        _typs = _fc[2].multiselect("Type", _typopts, key="qm_type",
+                                   help="Individual investor (guru) vs institutional (fund/AMC).")
+        _sides = _fc[3].multiselect("Side", ["BUY", "SELL"], key="qm_side")
         _exopts = [e for e in ["NSE", "BSE"] if e in set(_qm["exchange"].astype(str))]
-        _exs = _fc[3].multiselect("Exchange", _exopts, key="qm_exch")
-        _qq = _fc[4].text_input("🔎 Search investor / stock", key="qm_q").strip().lower()
+        _exs = _fc[4].multiselect("Exchange", _exopts, key="qm_exch")
+        _qq = _fc[5].text_input("🔎 Search investor / stock", key="qm_q").strip().lower()
         v = _qm.copy()
         if _win != "All":
             _cut = pd.Timestamp.now().normalize() - pd.Timedelta(days={"30d": 30, "60d": 60, "90d": 90, "180d": 180}[_win])
             v = v[v["_dt"].isna() | (v["_dt"] >= _cut)]
         if _srcs:
             v = v[v["source"].isin(_srcs)]
+        if _typs:
+            v = v[v["type"].isin(_typs)]
         if _sides:
             v = v[v["side"].isin(_sides)]
         if _exs:
