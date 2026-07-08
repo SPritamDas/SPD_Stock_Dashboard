@@ -359,26 +359,33 @@ def _index_hist(symbol, start, end):
         return pd.Series(dtype=float)
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=900)
 def _index_daychange(symbol):
-    """(last_close, %chg-from-prev-close, date) for an index via yfinance; (None,None,None) on failure."""
+    """(last_price, %chg-vs-previous-close) for an index. Prefers yfinance fast_info (LIVE/intraday —
+    daily download() bars lag a session and show a stale level); falls back to last two daily closes."""
     try:
         import yfinance as yf
+        t = yf.Ticker(symbol)
+        try:
+            fi = t.fast_info
+            last = getattr(fi, "last_price", None) or (fi.get("lastPrice") if hasattr(fi, "get") else None)
+            prev = getattr(fi, "previous_close", None) or (fi.get("previousClose") if hasattr(fi, "get") else None)
+            if last and prev:
+                return (float(last), (float(last) / float(prev) - 1) * 100.0)
+        except Exception:
+            pass
         d = yf.download(symbol, period="7d", progress=False, auto_adjust=True)
-        if d is None or d.empty:
-            return (None, None, None)
         c = d["Close"]
         if hasattr(c, "columns"):
             c = c.iloc[:, 0]
         c = c.dropna()
-        if len(c) < 1:
-            return (None, None, None)
-        if len(c) < 2:
-            return (float(c.iloc[-1]), None, c.index[-1])
-        last, prev = float(c.iloc[-1]), float(c.iloc[-2])
-        return (last, (last / prev - 1) * 100.0, c.index[-1])
+        if len(c) >= 2:
+            return (float(c.iloc[-1]), (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100.0)
+        if len(c) == 1:
+            return (float(c.iloc[-1]), None)
     except Exception:
-        return (None, None, None)
+        pass
+    return (None, None)
 
 
 # raw column name -> the SAME friendly label shown in each table's header, so the filter dropdowns
@@ -1837,7 +1844,9 @@ html, body,
 [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p{
   color:var(--spd-muted); font-size:.72rem; font-weight:600; letter-spacing:.06em; text-transform:uppercase;
 }
-[data-testid="stMetricValue"]{ color:var(--spd-text-strong); font-weight:700; letter-spacing:-.01em; font-variant-numeric:tabular-nums; }
+[data-testid="stMetricValue"]{ color:var(--spd-text-strong); font-weight:700; letter-spacing:-.015em;
+  font-variant-numeric:tabular-nums; font-size:clamp(1.0rem, 1.4vw, 1.55rem); line-height:1.2; }
+[data-testid="stMetricValue"] > div{ overflow:visible; }
 [data-testid="stMetricDelta"]{ font-weight:600; font-variant-numeric:tabular-nums; }
 
 /* sidebar shell + radio navigation → nav pills */
@@ -2825,7 +2834,8 @@ if _mode == "⭐ Superstars":
                 st.caption(f"Top {len(_hh)} disclosed positions by ₹ value (latest reported quarter). "
                            "Bigger tile = larger holding.")
 
-        # ---- 📈 portfolio value vs index ----
+        # ---- 📈 net-worth over time (disclosed AUM trajectory — NOT a return vs index, because
+        #      net-worth grows from fresh capital added too; that's why there's no benchmark line) ----
         _ph = fetch_portfolio_history_tab()
         _pmine = (_ph[_ph["investor"].astype(str).str.lower() == _pick.lower()].copy()
                   if (not _ph.empty and "investor" in _ph.columns) else pd.DataFrame())
@@ -2834,40 +2844,25 @@ if _mode == "⭐ Superstars":
             _pmine["_nw"] = pd.to_numeric(_pmine["net_worth_cr"], errors="coerce")
             _pmine = _pmine.dropna(subset=["_dt", "_nw"]).sort_values("_dt")
         if len(_pmine) >= 2:
-            st.markdown("#### 📈 Portfolio value vs index")
-            _bm = st.selectbox("Benchmark", list(_INDEX_SYMBOLS), key=f"bm_{_pick}",
-                               help="Compare growth against any Indian index (same list as the 🌐 Indices tab). "
-                                    "If an investor is small-cap heavy, pick Nifty Smallcap 100.")
-            _pmine["_reb"] = _pmine["_nw"] / _pmine["_nw"].iloc[0] * 100.0
+            st.markdown("#### 📈 Net-worth over time")
             import plotly.graph_objects as _go
-            _pfig = _go.Figure()
-            _pfig.add_trace(_go.Scatter(x=_pmine["_dt"], y=_pmine["_reb"], name=_pick.title(),
-                            mode="lines+markers", line=dict(color="#E3B341", width=2.6),
-                            marker=dict(size=4)))
-            _idx = _index_hist(_INDEX_SYMBOLS[_bm], _pmine["_dt"].min(), _pmine["_dt"].max() + pd.Timedelta(days=4))
-            if not _idx.empty:
-                _uidx = _idx.reindex(_idx.index.union(pd.DatetimeIndex(_pmine["_dt"]))).sort_index().ffill()
-                _bm_at = _uidx.reindex(pd.DatetimeIndex(_pmine["_dt"]))
-                if _bm_at.dropna().shape[0] >= 2:
-                    _bm_reb = _bm_at / _bm_at.dropna().iloc[0] * 100.0
-                    _pfig.add_trace(_go.Scatter(x=_pmine["_dt"], y=_bm_reb.values, name=_bm,
-                                    mode="lines", line=dict(color="#6AA6FF", width=2, dash="dot")))
-                else:
-                    st.caption(f"_{_bm}: no Yahoo data for this window — showing portfolio only._")
-            else:
-                st.caption(f"_{_bm}: unavailable from Yahoo — showing portfolio only._")
-            _pfig.update_layout(template="plotly_dark", height=360, margin=dict(l=8, r=8, t=10, b=8),
+            _pfig = _go.Figure(_go.Scatter(
+                x=_pmine["_dt"], y=_pmine["_nw"], name="Disclosed net worth",
+                mode="lines+markers", line=dict(color="#E3B341", width=2.6), marker=dict(size=4),
+                hovertemplate="%{x|%b %Y}<br>₹%{y:,.0f} cr<extra></extra>"))
+            _pfig.update_layout(template="plotly_dark", height=340, margin=dict(l=8, r=8, t=10, b=8),
                                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                                legend=dict(orientation="h", y=1.14, x=0),
-                                yaxis=dict(title="Rebased to 100 · log", type="log"))
+                                showlegend=False, font=dict(family="Inter, sans-serif"),
+                                yaxis=dict(title="₹ crore · log", type="log"))
             st.plotly_chart(_pfig, use_container_width=True, config={"displaylogo": False})
-            _lastv = _pmine["_reb"].iloc[-1]
-            st.caption(f"Net-worth rebased to 100 at **{_pmine['_dt'].iloc[0].date()}** → **{_lastv:.0f}** now "
-                       f"({_lastv - 100:+.0f}%). Net-worth includes capital added/withdrawn, so read as "
-                       "directional, not a pure return.")
+            _first, _last = _pmine["_nw"].iloc[0], _pmine["_nw"].iloc[-1]
+            st.caption(f"Disclosed net worth: ₹{_first:,.0f} cr ({_pmine['_dt'].iloc[0].date()}) → "
+                       f"**₹{_last:,.0f} cr** now. ⚠️ This is portfolio **size** — it grows from **returns AND "
+                       "fresh capital added**, so it's a trajectory/scale view, not a return-vs-index comparison "
+                       "(which net-worth can't give without the cash-flow history).")
         elif _pmine.empty:
-            st.caption("📈 A **portfolio-vs-index** chart appears here once the notebook's "
-                       "`build_portfolio_history` step has run (it stores each investor's net-worth series).")
+            st.caption("📈 A net-worth trajectory appears here once the notebook's "
+                       "`build_portfolio_history` step has run.")
 
         # ==== 📊 Deals & performance zone (bulk/block · performance · SAST · insider) ====
         _bb = fetch_superstar_bulkblock()
@@ -3599,7 +3594,7 @@ if _mode == "🌍 Today":
                   "Nifty Midcap 100": "NIFTY_MIDCAP_100.NS", "Nifty Smallcap 100": "^CNXSC"}
     _ic = st.columns(len(_IDX_TODAY))
     for _i, (_nm, _sym) in enumerate(_IDX_TODAY.items()):
-        _lc, _pc, _idt = _index_daychange(_sym)
+        _lc, _pc = _index_daychange(_sym)
         if _lc is not None:
             _ic[_i].metric(_nm, f"{_lc:,.0f}", delta=(f"{_pc:+.2f}%" if _pc is not None else None))
         else:
