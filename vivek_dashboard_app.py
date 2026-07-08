@@ -1148,6 +1148,7 @@ _FLOAT_CALC_HTML = r"""
     var W = window.parent;                      // the MAIN page (persists across Streamlit reruns)
     var doc = W.document;
     var S = W.__spdCalcState || (W.__spdCalcState = {});   // calc state kept on the parent window
+    if (S.min === undefined) S.min = true;                 // start MINIMIZED on first load (expand when needed)
 
     // Lifecycle: _FLOAT_CALC_HTML is a constant string at a fixed tree position, so Streamlit
     // normally REUSES the same iframe across reruns — this IIFE runs ONCE, and the panel + its
@@ -1376,6 +1377,7 @@ _FLOAT_NOTES_HTML = r"""
   try {
     var W = window.parent, doc = W.document;
     var UI = W.__spdNotesUI || (W.__spdNotesUI = {});   // panel position / open-state (per session)
+    if (UI.min === undefined) UI.min = true;            // start MINIMIZED on first load (expand when needed)
     ['spd-notes', 'spd-notes-reopen', 'spd-notes-style'].forEach(function (id) {
       var el = doc.getElementById(id); if (el) el.remove();   // rebuild fresh each run (see calculator note)
     });
