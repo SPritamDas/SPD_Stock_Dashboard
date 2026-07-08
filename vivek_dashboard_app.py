@@ -3360,8 +3360,8 @@ if not _fund_any and (not cache or ticker not in cache.get("data", {})):
     _fund_any = fetch_fund(ticker)           # off-universe ticker (e.g. superstar pick) → live-fetch
 _ffig, _finfo = core.build_fundamentals_chart(_fund_any)
 if _ffig is not None:
-    with st.container(border=True):
-        st.markdown("**📊 Fundamentals — revenue & net-profit over time** "
+    with st.expander("📊 Fundamentals — revenue, net-profit & key ratios", expanded=False):
+        st.markdown("**Revenue & net-profit over time** "
                     "(gold = period-best · ★ + green outline = latest)")
         st.plotly_chart(_ffig, use_container_width=True, config={"displaylogo": False})
 
@@ -3423,27 +3423,31 @@ with st.container(border=True):
     r1[3].metric("Exp. profit", f"{k['exp_profit_pct']:.1f}%" if k['exp_profit_pct'] is not None else "—")
     r1[4].metric("Approx. time", f"{k['exp_duration_days']} d" if k['exp_duration_days'] else "—")
     r1[5].metric("Median days", k["median_days"] if k["median_days"] else "—")
-    # row 2 — outcome rates + counts (all out of CLOSED trades)
-    r2 = st.columns(6)
-    r2[0].metric("Success (of closed)", f"{k['success_rate']:.1f}%" if k['success_rate'] is not None else "—")
-    r2[1].metric("Non-loss (of closed)", f"{k['nonloss_rate']:.1f}%" if k['nonloss_rate'] is not None else "—")
-    r2[2].metric("Avg win", f"{k['avg_win_profit']:.1f}%" if k['avg_win_profit'] is not None else "—")
-    r2[3].metric("Opportunities", k["total_ops"] if k["total_ops"] is not None else "—")
-    r2[4].metric("Succeeded / Closed",
-                 f"{k['total_succ']} / {k['total_closed']}"
-                 if (k['total_succ'] is not None and k['total_closed'] is not None) else "—")
-    r2[5].metric("Non-loss / Closed",
-                 f"{k['total_nonloss']} / {k['total_closed']}"
-                 if (k['total_nonloss'] is not None and k['total_closed'] is not None) else "—")
-    # row 3 — recency
-    r3 = st.columns(6)
-    r3[0].metric("Last opp.", str(pd.to_datetime(k["last_opp_date"]).date())
-                 if k["last_opp_date"] is not None else "—")
-    r3[1].metric("Last result", (k["last_opp_result"] or "—") if k["last_opp_date"] is not None else "—")
-    st.caption("All rates are **out of CLOSED trades** (Open trades — still held / target not yet "
-               "reached — are excluded). **Success** = target reached **on-pace** (3×-in-3yr: "
-               "+20%≈6mo · +44%≈1y · +100%≈23mo · +200%=3y). **Non-loss** = reached target at all "
-               "(on-pace *or* off-pace); for SMA/Knoxville it excludes trades sold below entry.")
+    # success rate stays visible as the one headline outcome; the rest is one click away
+    st.metric("Success rate (of closed trades)",
+              f"{k['success_rate']:.1f}%" if k['success_rate'] is not None else "—")
+    with st.expander("📉 More trade stats — counts, averages, recency", expanded=False):
+        # row 2 — outcome rates + counts (all out of CLOSED trades)
+        r2 = st.columns(6)
+        r2[0].metric("Success (of closed)", f"{k['success_rate']:.1f}%" if k['success_rate'] is not None else "—")
+        r2[1].metric("Non-loss (of closed)", f"{k['nonloss_rate']:.1f}%" if k['nonloss_rate'] is not None else "—")
+        r2[2].metric("Avg win", f"{k['avg_win_profit']:.1f}%" if k['avg_win_profit'] is not None else "—")
+        r2[3].metric("Opportunities", k["total_ops"] if k["total_ops"] is not None else "—")
+        r2[4].metric("Succeeded / Closed",
+                     f"{k['total_succ']} / {k['total_closed']}"
+                     if (k['total_succ'] is not None and k['total_closed'] is not None) else "—")
+        r2[5].metric("Non-loss / Closed",
+                     f"{k['total_nonloss']} / {k['total_closed']}"
+                     if (k['total_nonloss'] is not None and k['total_closed'] is not None) else "—")
+        # row 3 — recency
+        r3 = st.columns(6)
+        r3[0].metric("Last opp.", str(pd.to_datetime(k["last_opp_date"]).date())
+                     if k["last_opp_date"] is not None else "—")
+        r3[1].metric("Last result", (k["last_opp_result"] or "—") if k["last_opp_date"] is not None else "—")
+        st.caption("All rates are **out of CLOSED trades** (Open trades — still held / target not yet "
+                   "reached — are excluded). **Success** = target reached **on-pace** (3×-in-3yr: "
+                   "+20%≈6mo · +44%≈1y · +100%≈23mo · +200%=3y). **Non-loss** = reached target at all "
+                   "(on-pace *or* off-pace); for SMA/Knoxville it excludes trades sold below entry.")
     if k.get("target_estimated"):
         st.caption("〜 **Target/Exp. profit are estimated** from the historical median winning "
                    "move — this strategy exits on a signal, not a fixed price target.")
@@ -3455,8 +3459,7 @@ with st.container(border=True):
 render_chart_block(a, ticker)
 
 # ---- BACK-TESTING ----
-with st.container(border=True):
-    st.markdown("**Back-testing — historical opportunities**")
+with st.expander("🔬 Back-testing — how this strategy did on past signals", expanded=False):
     st.caption("**Result:** **Success** = target/exit hit on-pace · **Slow (off-pace)** = hit, "
                "but too slowly to count · **Loss** = sold below entry (SMA/Knoxville) · "
                "**Open** = still held / target not reached.")
