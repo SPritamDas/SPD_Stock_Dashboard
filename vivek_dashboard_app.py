@@ -2477,10 +2477,14 @@ if _mode == "⭐ Superstars":
         view["sharpe_x_nifty"] = (_ish / _bsh).where(_bsh > 1e-9).round(1)   # e.g. 0.84/0.12 ≈ 7.0×
 
     # ---- investor list table (sortable, row-selectable) ----
-    _wanted = ["name", "type", "signal", "confidence_score", "score_vs_benchmark", "alpha_ann_pct",
-               "sharpe_ratio", "nifty_sharpe_ratio", "sharpe_x_nifty", "information_ratio",
-               "ann_return_pct", "nifty_ann_return_pct", "rolling_1y_pct",
-               "max_drawdown_pct", "nifty_max_drawdown_pct", "quarters_tracked", "current_net_worth_cr"]
+    _adv_cols = st.checkbox("Show advanced columns (Nifty comparisons · raw Sharpe · Info ratio · rank · quarters)",
+                            value=False, key="sstar_advcols")
+    _core_cols = ["name", "signal", "type", "sharpe_x_nifty", "alpha_ann_pct",
+                  "ann_return_pct", "max_drawdown_pct", "current_net_worth_cr"]
+    _adv_extra = ["confidence_score", "score_vs_benchmark", "sharpe_ratio", "nifty_sharpe_ratio",
+                  "information_ratio", "nifty_ann_return_pct", "rolling_1y_pct",
+                  "nifty_max_drawdown_pct", "quarters_tracked"]
+    _wanted = _core_cols + (_adv_extra if _adv_cols else [])
     _disp = view[[c for c in _wanted if c in view.columns]].reset_index(drop=True)
     _ltok = hashlib.md5("|".join(_disp["name"].astype(str)).encode()).hexdigest()[:10]   # reset selection if list changes
     _ev = st.dataframe(
@@ -2488,6 +2492,10 @@ if _mode == "⭐ Superstars":
         on_select="rerun", selection_mode="single-row", key="sstar_list_" + _ltok,
         column_config={
             "name": st.column_config.TextColumn("Investor"),
+            "type": st.column_config.TextColumn("Type"),
+            "signal": st.column_config.TextColumn("Signal"),
+            "score_vs_benchmark": st.column_config.TextColumn("Rank score"),
+            "quarters_tracked": st.column_config.NumberColumn("Quarters", format="%d"),
             "confidence_score": st.column_config.NumberColumn("Conf", format="%d"),
             "alpha_ann_pct": st.column_config.NumberColumn("Alpha %", format="%.1f"),
             "sharpe_ratio": st.column_config.NumberColumn("Sharpe", format="%.3f"),
@@ -2510,11 +2518,12 @@ if _mode == "⭐ Superstars":
             "max_drawdown_pct": st.column_config.NumberColumn("Max DD %", format="%.1f"),
             "current_net_worth_cr": st.column_config.NumberColumn("Net worth ₹Cr", format="%.0f"),
         })
-    st.caption("**Sharpe ×Nifty** = how many times the index's reward-per-risk (Nifty Sharpe ≈ 0.12) — "
-               "read this, not the raw Sharpe's 0–3 scale. **Info Ratio** = consistency of beating the "
-               "benchmark (>0.5 good). Sorted best-first (signal → confidence → alpha). **Reminder:** alpha/Sharpe come from "
-               "*net-worth* changes (contaminated by capital flows) — treat as **directional**, and verify "
-               "any name in **Stock Analysis** before acting.")
+    with st.expander("ℹ️ How to read this table"):
+        st.caption("**Sharpe ×Nifty** = how many times the index's reward-per-risk (Nifty Sharpe ≈ 0.12) — "
+                   "read this, not the raw Sharpe's 0–3 scale. **Info Ratio** = consistency of beating the "
+                   "benchmark (>0.5 good). Sorted best-first (signal → confidence → alpha). **Reminder:** alpha/Sharpe come from "
+                   "*net-worth* changes (contaminated by capital flows) — treat as **directional**, and verify "
+                   "any name in **Stock Analysis** before acting.")
 
     _sel = _ev.selection["rows"] if _ev and _ev.selection else []
     if _sel and _sel[0] < len(_disp):
