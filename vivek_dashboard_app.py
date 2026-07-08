@@ -1778,22 +1778,23 @@ if _mode == "💡 Allocate ₹":
         st.warning("No data yet — run the notebook (superstar feeds) and build the price cache from **📊 Stocks**.")
         st.stop()
 
-    _c = st.columns([2, 2, 2, 3, 3])
+    _c = st.columns([2, 2])
     _budget = _c[0].number_input("Budget ₹", value=50000, min_value=1000, step=5000)
     _profile = _c[1].selectbox("Risk profile", ["Balanced", "Conservative", "Aggressive"],
                                help="Balanced ~8 · Conservative liquid/diversified ~12 · Aggressive concentrated ~5")
-    _n = _c[2].number_input("How many stocks",
-                            value={"Balanced": 8, "Conservative": 12, "Aggressive": 5}[_profile],
-                            min_value=3, max_value=20, step=1)
-    _univ = _c[3].selectbox("Universe", ["All superstar-held", "V-universe only"],
-                            help="All = every stock the quality gurus hold (wider; non-V names ride on the "
-                                 "superstar signal alone, no fundamental/strategy vetting). V-universe only = "
-                                 "restrict to your vetted V40 / V40-N / V200 names.")
-    _need_setup = _c[4].checkbox("Only names with a live strategy setup", value=False,
-                                 help="On → every pick has a defined entry/target/expected-profit from your backtests.")
-    _value_only = st.checkbox("💎 Only \'earnings-up, price-down\' setups (the Singhania / Kela value pattern)", value=False,
-                              help="Keep only names whose revenue & profit are rising while the price has FALLEN over ~6 months — "
-                                   "fundamentally improving but out of favour (what the pro individual gurus quietly accumulate).")
+    with st.expander("⚙️ Advanced filters — how many · universe · only-setups · only-bargains", expanded=False):
+        _n = st.number_input("How many stocks",
+                             value={"Balanced": 8, "Conservative": 12, "Aggressive": 5}[_profile],
+                             min_value=3, max_value=20, step=1)
+        _univ = st.selectbox("Universe", ["All superstar-held", "V-universe only"],
+                             help="All = every stock the quality gurus hold (wider; non-V names ride on the "
+                                  "superstar signal alone, no fundamental/strategy vetting). V-universe only = "
+                                  "restrict to your vetted V40 / V40-N / V200 names.")
+        _need_setup = st.checkbox("Only names with a live strategy setup", value=False,
+                                  help="On → every pick has a defined entry/target/expected-profit from your backtests.")
+        _value_only = st.checkbox("💎 Only bargains — profits rising but price has fallen (~6 months)", value=False,
+                                  help="Keep only names whose revenue & profit are rising while the price has FALLEN "
+                                       "over ~6 months — fundamentally improving but out of favour.")
 
     # ---- build the candidate universe: superstar stocks ∪ live-setup stocks ----
     if not _sc.empty:
@@ -2440,13 +2441,14 @@ if _mode == "⭐ Superstars":
     _type_present = sorted(_sdf["type"].dropna().astype(str).unique()) if "type" in _sdf.columns else []
     _types = _f1[2].multiselect("Type", _type_present, key="sstar_type",
                                 help="Individual investor (guru) vs institutional (fund/AMC).")
-    _f2 = st.columns(4)
-    _minsh = _f2[0].number_input("Min Sharpe", value=None, step=0.1, format="%.2f", key="sstar_minsh",
-                                 placeholder="—")
-    _minal = _f2[1].number_input("Min Alpha %", value=None, step=1.0, key="sstar_minal", placeholder="—")
-    _minann = _f2[2].number_input("Min Ann ret %", value=None, step=1.0, key="sstar_minann", placeholder="—")
-    _mindd = _f2[3].number_input("Max DD ≥ %", value=None, step=5.0, key="sstar_mindd", placeholder="—",
-                                 help="Drawdown not worse than this (e.g. -40 hides names that fell past -40%).")
+    with st.expander("⚙️ Advanced filters — Sharpe · Alpha · Return · Max drawdown", expanded=False):
+        _f2 = st.columns(4)
+        _minsh = _f2[0].number_input("Min Sharpe", value=None, step=0.1, format="%.2f", key="sstar_minsh",
+                                     placeholder="—")
+        _minal = _f2[1].number_input("Min Alpha %", value=None, step=1.0, key="sstar_minal", placeholder="—")
+        _minann = _f2[2].number_input("Min Ann ret %", value=None, step=1.0, key="sstar_minann", placeholder="—")
+        _mindd = _f2[3].number_input("Max DD ≥ %", value=None, step=5.0, key="sstar_mindd", placeholder="—",
+                                     help="Drawdown not worse than this (e.g. -40 hides names that fell past -40%).")
     view = _sdf.copy()
     if _q:
         view = view[view["name"].astype(str).str.lower().str.contains(_q, na=False)]
@@ -2802,7 +2804,7 @@ if _mode == "🔔 Alerts":
                    "open each portfolio. Bulk/block covers **both exchanges**; SAST is NSE Reg 29; insider is PIT/SAST "
                    f"(a Reg-29 crossing can appear under both **SAST** and **Insider**). Quality names: {_qnames_disp}")
         _fc = st.columns([2, 2, 2, 2, 2, 3])
-        _win = _fc[0].selectbox("Window", ["30d", "60d", "90d", "180d", "All"], index=3, key="qm_win")
+        _win = _fc[0].selectbox("Window", ["30d", "60d", "90d", "180d", "All"], index=0, key="qm_win")
         _srcs = _fc[1].multiselect("Source", sorted(_qm["source"].dropna().unique()), key="qm_src")
         _typopts = sorted(x for x in _qm["type"].dropna().astype(str).unique() if x.strip())
         _typs = _fc[2].multiselect("Type", _typopts, key="qm_type",
@@ -3013,12 +3015,13 @@ if _mode == "🔔 Alerts":
     _aq = _af1[0].text_input("🔎 Search investor", key="alert_q").strip().lower()
     _asig = _af1[1].multiselect("Signal (any of)", ["STRONG BUY", "BUY", "WATCH", "HOLD", "AVOID"],
                                 default=["STRONG BUY", "BUY"], key="alert_sig")
-    _af2 = st.columns(4)
-    _ash = _af2[0].number_input("Min Sharpe", value=0.5, step=0.1, format="%.2f", key="alert_sh")
-    _aal = _af2[1].number_input("Min Alpha %", value=None, step=1.0, key="alert_al", placeholder="—")
-    _aann = _af2[2].number_input("Min Ann ret %", value=None, step=1.0, key="alert_minann", placeholder="—")
-    _add = _af2[3].number_input("Max DD ≥ %", value=-40.0, step=5.0, key="alert_dd",
-                                help="Drawdown not worse than this.")
+    with st.expander("⚙️ Advanced filters — Sharpe · Alpha · Return · Max drawdown", expanded=False):
+        _af2 = st.columns(4)
+        _ash = _af2[0].number_input("Min Sharpe", value=0.5, step=0.1, format="%.2f", key="alert_sh")
+        _aal = _af2[1].number_input("Min Alpha %", value=None, step=1.0, key="alert_al", placeholder="—")
+        _aann = _af2[2].number_input("Min Ann ret %", value=None, step=1.0, key="alert_minann", placeholder="—")
+        _add = _af2[3].number_input("Max DD ≥ %", value=-40.0, step=5.0, key="alert_dd",
+                                    help="Drawdown not worse than this.")
 
     def _qualify(df):
         if df.empty:
