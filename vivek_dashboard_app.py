@@ -223,6 +223,26 @@ def _cur_price(ticker):
         return None
 
 
+@st.cache_data(show_spinner=False, ttl=21600)
+def _hist_df(symbol):
+    """~2y daily (Date, Close) for an NSE/BSE symbol — read BOTH the latest close and the close on a
+    report date from one fetch. None for BSE-numeric / unresolvable tickers."""
+    t = str(symbol).strip().upper()
+    if not t or t.isdigit():
+        return None
+    df = _fetch_one_raw(t, years=2)
+    if df is None or getattr(df, "empty", True) or "Date" not in getattr(df, "columns", []) or "Close" not in df.columns:
+        return None
+    d = df[["Date", "Close"]].dropna().copy()
+    _ds = pd.to_datetime(d["Date"], errors="coerce")
+    try:
+        _ds = _ds.dt.tz_localize(None)          # yfinance dates are tz-aware (Asia/Kolkata) → drop tz
+    except (TypeError, AttributeError):
+        pass
+    d["Date"] = _ds
+    return d.dropna(subset=["Date"]).reset_index(drop=True)
+
+
 @st.cache_data(show_spinner=False)
 def fetch_fund(ticker):
     return vs.fetch_fundamentals(ticker)
@@ -3671,11 +3691,30 @@ if _mode == "🌍 Reports":
     v = v.copy()
     v["_dt"] = pd.to_datetime(v["date"], errors="coerce", dayfirst=True)
     v = v.sort_values("_dt", ascending=False, na_position="last").drop(columns="_dt").reset_index(drop=True)
-    # live current price (latest close) + expected profit vs target — the "should I invest?" number
-    _curmap = {s: _cur_price(s) for s in v["symbol"].dropna().astype(str).unique() if s and not s.isdigit()}
-    v["current"] = v["symbol"].map(_curmap)
-    _tn = pd.to_numeric(v["target"], errors="coerce"); _cn = pd.to_numeric(v["current"], errors="coerce")
-    v["exp_profit_pct"] = ((_tn - _cn) / _cn * 100).where(_cn > 0).round(2)
+    # track-record from yfinance: report-day close + latest close (one fetch/symbol) → then/since/now
+    _syms = [s for s in v["symbol"].dropna().astype(str).unique() if s and not s.isdigit()]
+    with st.spinner("Fetching prices…"):
+        _hist = {s: _hist_df(s) for s in _syms}
+
+    def _cur_of(sym):
+        _d = _hist.get(sym)
+        return float(_d["Close"].iloc[-1]) if (_d is not None and len(_d)) else None
+
+    def _close_on(sym, dt):
+        _d = _hist.get(sym)
+        if _d is None or not len(_d) or pd.isna(dt):
+            return None
+        _mm = _d[_d["Date"] <= dt]
+        return float(_mm["Close"].iloc[-1]) if len(_mm) else None
+    _rdt = pd.to_datetime(v["date"], errors="coerce", dayfirst=True)
+    v["current"] = v["symbol"].astype(str).map(_cur_of)
+    v["price_at_reco"] = [_close_on(str(s), d) for s, d in zip(v["symbol"], _rdt)]
+    _pr = pd.to_numeric(v["price_at_reco"], errors="coerce")
+    _cn = pd.to_numeric(v["current"], errors="coerce")
+    _tn = pd.to_numeric(v["target"], errors="coerce")
+    v["upside_pct"] = ((_tn - _pr) / _pr * 100).where(_pr > 0).round(2)       # EXP THEN (target vs report-day close)
+    v["since_reco_pct"] = ((_cn - _pr) / _pr * 100).where(_pr > 0).round(2)   # actual move since the report
+    v["exp_profit_pct"] = ((_tn - _cn) / _cn * 100).where(_cn > 0).round(2)   # EXP NOW (target vs current close)
     _m = st.columns(3)
     _m[0].metric("Reports shown", len(v))
     _m[1].metric("Recent upgrades", int((_rr["kind"] == "upgrade").sum()))
