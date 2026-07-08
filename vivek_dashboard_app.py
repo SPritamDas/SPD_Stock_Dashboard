@@ -817,12 +817,19 @@ def _applicable_strats(mem):
             if ("ALL_NSE" in c["groups"]) or (set(c["groups"]) & set(mem))]
 
 
+def _nav_to_stocks():
+    """Point the 2-level nav at 📊 Analyze → 📈 Stocks. Every jump-to-stock click-through calls this
+    (from a callback or before the nav renders), so setting the nav widget keys is always safe."""
+    st.session_state.nav_section = "📊 Analyze"
+    st.session_state.nav_analyze = "📈 Stocks"
+
+
 def _open_in_strategy(ticker, skey, from_index):
     """Jump from the index page straight into Stock Analysis for `ticker`, preselecting `skey`
     (the Strategy dropdown reads st.session_state.strat_sel)."""
     st.session_state.sel_ticker = ticker
     st.session_state.user_picked = True
-    st.session_state.app_mode = "📊 Stocks"
+    _nav_to_stocks()
     st.session_state.setdefault("extra_tickers", set()).add(ticker)
     st.session_state.jumped_from = from_index
     st.session_state.strat_sel = skey
@@ -833,7 +840,7 @@ def _open_stock(ticker, from_label):
     holding. Runs as a button on_click, so app_mode is set before any widget is instantiated."""
     st.session_state.sel_ticker = ticker
     st.session_state.user_picked = True
-    st.session_state.app_mode = "📊 Stocks"
+    _nav_to_stocks()
     st.session_state.setdefault("extra_tickers", set()).add(ticker)
     st.session_state.jumped_from = from_label
 
@@ -1695,7 +1702,7 @@ _goto = st.query_params.get("open")
 if _goto:
     st.session_state.sel_ticker = _goto
     st.session_state.user_picked = True
-    st.session_state.app_mode = "📊 Stocks"
+    _nav_to_stocks()
     st.session_state.setdefault("extra_tickers", set()).add(_goto)
     st.session_state.jumped_from = "📒 a note"
     try:
@@ -1703,10 +1710,23 @@ if _goto:
     except Exception:
         pass
 
-# ---- mode toggle (top of sidebar): Stocks  ⟷  Indices ----
+# ---- navigation: 3 intent-named SECTIONS, each with a couple of sub-views ----
+# The (section, sub-view) choice maps to the SAME internal `_mode` strings the page blocks below
+# already use, so nothing downstream changes and jump-to-stock click-throughs (which set the nav
+# keys via _nav_to_stocks) keep working.
+_SUBVIEWS = {
+    "📊 Analyze":  [("📈 Stocks", "📊 Stocks"), ("🌐 Indices", "🌐 Indices")],
+    "💡 Ideas":    [("🎯 Buy setups", "💎 Investable now"), ("💰 Size a budget", "💡 Allocate ₹")],
+    "⭐ Investors": [("📋 Investor list", "⭐ Superstars"), ("🔔 Recent moves", "🔔 Alerts")],
+}
+_SUBKEY = {"📊 Analyze": "nav_analyze", "💡 Ideas": "nav_ideas", "⭐ Investors": "nav_investors"}
 with st.sidebar:
-    _mode = st.radio("Mode", ["📊 Stocks", "🌐 Indices", "⭐ Superstars", "🔔 Alerts", "💎 Investable now", "💡 Allocate ₹"],
-                     horizontal=True, key="app_mode")
+    _section = st.radio("Section", list(_SUBVIEWS), key="nav_section",
+                        captions=["Look up any stock or index", "What to buy", "What the big money is doing"])
+    _subs = _SUBVIEWS[_section]
+    _sub = st.radio("View", [lbl for lbl, _m in _subs], horizontal=True, key=_SUBKEY[_section])
+    _mode = dict(_subs).get(_sub, _subs[0][1])
+st.session_state["app_mode"] = _mode      # keep the legacy key in sync for any residual reader
 
 # single heading per mode (no duplicate title)
 st.title("📈 SPritamDas — " + {"🌐 Indices": "Index Analysis", "⭐ Superstars": "Superstar Analysis",
@@ -2123,7 +2143,7 @@ if _mode == "🌐 Indices":
                     if _s and _s != "— pick a company —":
                         st.session_state.sel_ticker = _s
                         st.session_state.user_picked = True
-                        st.session_state.app_mode = "📊 Stocks"
+                        _nav_to_stocks()
                         st.session_state.setdefault("extra_tickers", set()).add(_s)
                         st.session_state.jumped_from = _idx["name"]
                 st.selectbox("🔎 Analyze a constituent →", ["— pick a company —"] + _syms,
