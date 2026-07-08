@@ -10,6 +10,10 @@ vivek_output/
 *_checkpoint.csv
 alerts_state.json
 
+# ── Run logs (from run_daily.sh) ─────────────────────────────
+run_daily_*.log
+*.log
+
 # ── Python / OS ──────────────────────────────────────────────
 __pycache__/
 *.pyc
