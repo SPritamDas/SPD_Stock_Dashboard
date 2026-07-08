@@ -1993,6 +1993,18 @@ with st.sidebar:
     _subs = _SUBVIEWS[_section]
     _sub = st.radio("View", [lbl for lbl, _m in _subs], key=_SUBKEY[_section])
     _mode = dict(_subs).get(_sub, _subs[0][1])
+    if _section == "🌍 Markets":
+        st.markdown("<hr style='margin:.5rem 0 .3rem'>", unsafe_allow_html=True)
+        if st.button("🔄  Refresh market data", use_container_width=True,
+                     help="Re-read the FII/DII · IPO · reports · deals feeds + live index/prices. "
+                          "Run the notebook (or run_daily.sh) to refresh the underlying sheet data."):
+            for _f in (fetch_fii_dii_flow, fetch_ipo_dashboard, fetch_research_reports,
+                       fetch_market_bulkblock, build_quality_moves, _index_daychange, _cur_price):
+                try:
+                    _f.clear()
+                except Exception:
+                    pass
+            st.rerun()
 st.session_state["app_mode"] = _mode      # keep the legacy key in sync for any residual reader
 
 # single heading per mode (no duplicate title)
