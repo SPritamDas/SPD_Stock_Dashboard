@@ -3515,6 +3515,10 @@ if _mode == "🌍 FII/DII":
         _fig.add_bar(x=_xlab, y=_piv["FII"], name="FII / FPI", marker_color="#6AA6FF")
     if "DII" in _piv.columns:
         _fig.add_bar(x=_xlab, y=_piv["DII"], name="DII", marker_color="#E3B341")
+    if "FII" in _piv.columns and "DII" in _piv.columns:      # overall net (FII+DII), dotted line
+        _comb = _piv["FII"].fillna(0) + _piv["DII"].fillna(0)
+        _fig.add_trace(_go.Scatter(x=_xlab, y=_comb, name="Combined net", mode="lines+markers",
+                       line=dict(color="#EAEEF6", width=1.8, dash="dot"), marker=dict(size=4)))
     _fig.update_layout(barmode="group", template="plotly_dark", height=400,
                        margin=dict(l=8, r=8, t=28, b=8), paper_bgcolor="rgba(0,0,0,0)",
                        plot_bgcolor="rgba(0,0,0,0)", legend=dict(orientation="h", y=1.12, x=0),
@@ -3522,6 +3526,8 @@ if _mode == "🌍 FII/DII":
                        xaxis=dict(type="category"), font=dict(family="Inter, sans-serif"))
     _fig.add_hline(y=0, line_color="#3A3F49", line_width=1)
     st.plotly_chart(_fig, use_container_width=True, config={"displaylogo": False})
+    st.caption("Source: [Trendlyne FII/DII cash-market](https://trendlyne.com/macro-data/fii-dii/latest/cash-pastmonth/) "
+               "(scraped) — same daily figures NSE reports.")
     with st.expander("📄 Raw daily figures"):
         st.dataframe(filter_ui(_flow[["date", "category", "buy_cr", "sell_cr", "net_cr"]]
                                .sort_values("date", ascending=False), "fiidii_raw"),
@@ -3592,6 +3598,8 @@ if _mode == "🌍 IPOs":
                      "rating": st.column_config.TextColumn("Rating")})
     st.caption("⚠️ GMP is a **grey-market estimate** (investorgain) — not official, not a guarantee; it "
                "moves daily and can vanish at listing. Use only as a sentiment gauge.")
+    st.caption("Source: [investorgain IPO GMP](https://www.investorgain.com/report/ipo-gmp-live/331/) "
+               "(scraped) + NSE upcoming/current IPO API.")
     st.stop()
 
 if _mode == "🌍 Reports":
@@ -3617,7 +3625,9 @@ if _mode == "🌍 Reports":
     if _q:
         v = v[v["name"].astype(str).str.lower().str.contains(_q, na=False)
               | v["symbol"].astype(str).str.lower().str.contains(_q, na=False)]
-    v = v.sort_values("upside_pct", ascending=False, na_position="last").reset_index(drop=True)
+    v = v.copy()
+    v["_dt"] = pd.to_datetime(v["date"], errors="coerce", dayfirst=True)
+    v = v.sort_values("_dt", ascending=False, na_position="last").drop(columns="_dt").reset_index(drop=True)
     _m = st.columns(3)
     _m[0].metric("Reports shown", len(v))
     _m[1].metric("Recent upgrades", int((_rr["kind"] == "upgrade").sum()))
@@ -3626,9 +3636,10 @@ if _mode == "🌍 Reports":
         _b = v.loc[v["upside_pct"].idxmax()]
         st.success(f"🏆 Highest broker upside here: **{_b['name']} ({_b['symbol']})** — {_b['broker']} "
                    f"target ₹{_b['target']} · **+{_b['upside_pct']:.0f}%**")
-    _show = ["symbol", "name", "broker", "call", "target", "upside_pct", "kind", "pdf"]
+    _show = ["date", "symbol", "name", "broker", "call", "target", "upside_pct", "kind", "trendlyne_url", "pdf"]
     st.dataframe(filter_ui(v[[c for c in _show if c in v.columns]], "rr_tbl"), hide_index=True,
                  use_container_width=True, height=520, column_config={
+                     "date": st.column_config.TextColumn("Date"),
                      "symbol": st.column_config.TextColumn("Symbol"),
                      "name": st.column_config.TextColumn("Stock", width="medium"),
                      "broker": st.column_config.TextColumn("Broker"),
@@ -3636,7 +3647,10 @@ if _mode == "🌍 Reports":
                      "target": st.column_config.TextColumn("Target ₹"),
                      "upside_pct": st.column_config.NumberColumn("Upside %", format="%.1f%%"),
                      "kind": st.column_config.TextColumn("Type"),
+                     "trendlyne_url": st.column_config.LinkColumn("Trendlyne", display_text="view"),
                      "pdf": st.column_config.LinkColumn("PDF", display_text="open")})
+    st.caption("Source: [Trendlyne research reports](https://trendlyne.com/research-reports/all/) "
+               "(scraped). Click **view** to open the report on Trendlyne, **open** for the PDF.")
     st.stop()
 
 if _mode == "🌍 Today":
