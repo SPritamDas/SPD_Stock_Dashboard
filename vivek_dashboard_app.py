@@ -1922,6 +1922,23 @@ div[data-baseweb="textarea"]:focus-within{ border-color:var(--spd-gold-line) !im
 /* links */
 [data-testid="stMarkdownContainer"] a{ text-decoration-thickness:1px; text-underline-offset:2px; }
 
+/* sidebar external quick-links — stacked premium pills with gold hover */
+.spd-quicklinks{ display:flex; flex-direction:column; gap:6px; margin:2px 0 12px; }
+.spd-quicklinks a{
+  display:flex; align-items:center; gap:10px; padding:9px 12px; border-radius:.6rem;
+  border:1px solid var(--spd-line); background:linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,0) 60%), var(--spd-elev);
+  color:#E7E9ED !important; text-decoration:none !important; font-weight:600; font-size:.86rem;
+  transition:border-color .16s ease, background .16s ease, transform .06s ease, color .16s ease;
+}
+.spd-quicklinks a .ic{ font-size:1rem; line-height:1; }
+.spd-quicklinks a .nm{ flex:1; letter-spacing:.01em; }
+.spd-quicklinks a .ar{ color:var(--spd-muted); font-size:.85rem; }
+.spd-quicklinks a:hover{
+  border-color:var(--spd-gold-line); color:var(--spd-gold-hi) !important;
+  background:var(--spd-gold-soft); transform:translateX(2px);
+}
+.spd-quicklinks a:hover .ar{ color:var(--spd-gold); }
+
 /* premium thin scrollbars */
 *::-webkit-scrollbar{ width:10px; height:10px; }
 *::-webkit-scrollbar-track{ background:transparent; }
@@ -1959,13 +1976,15 @@ _SUBVIEWS = {
 }
 _SUBKEY = {"📊 Analyze": "nav_analyze", "💡 Ideas": "nav_ideas", "⭐ Investors": "nav_investors", "🌍 Markets": "nav_markets"}
 with st.sidebar:
-    st.caption("🔗 Quick links")
-    _ql = st.columns(3)
-    _ql[0].link_button("🔎 Screener", "https://www.screener.in/", use_container_width=True)
-    _ql[1].link_button("📊 Trendlyne", "https://trendlyne.com/", use_container_width=True)
-    _ql[2].link_button("📈 TradingView", "https://in.tradingview.com/chart/?symbol=NSE%3ANIFTY",
-                       use_container_width=True)
-    st.markdown("<hr style='margin:.5rem 0 .3rem'>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="spd-quicklinks">'
+        '<a href="https://trendlyne.com/" target="_blank" rel="noopener">'
+        '<span class="ic">📊</span><span class="nm">Trendlyne</span><span class="ar">↗</span></a>'
+        '<a href="https://in.tradingview.com/chart/?symbol=NSE%3ANIFTY" target="_blank" rel="noopener">'
+        '<span class="ic">📈</span><span class="nm">TradingView</span><span class="ar">↗</span></a>'
+        '<a href="https://www.screener.in/" target="_blank" rel="noopener">'
+        '<span class="ic">🔎</span><span class="nm">Screener</span><span class="ar">↗</span></a>'
+        '</div>', unsafe_allow_html=True)
     _section = st.radio("Section", list(_SUBVIEWS), key="nav_section",
                         captions=["Look up any stock or index", "What to buy",
                                   "What the big money is doing", "The macro tape"])
