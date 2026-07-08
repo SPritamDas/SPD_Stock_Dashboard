@@ -1959,6 +1959,13 @@ _SUBVIEWS = {
 }
 _SUBKEY = {"📊 Analyze": "nav_analyze", "💡 Ideas": "nav_ideas", "⭐ Investors": "nav_investors", "🌍 Markets": "nav_markets"}
 with st.sidebar:
+    st.caption("🔗 Quick links")
+    _ql = st.columns(3)
+    _ql[0].link_button("🔎 Screener", "https://www.screener.in/", use_container_width=True)
+    _ql[1].link_button("📊 Trendlyne", "https://trendlyne.com/", use_container_width=True)
+    _ql[2].link_button("📈 TradingView", "https://in.tradingview.com/chart/?symbol=NSE%3ANIFTY",
+                       use_container_width=True)
+    st.markdown("<hr style='margin:.5rem 0 .3rem'>", unsafe_allow_html=True)
     _section = st.radio("Section", list(_SUBVIEWS), key="nav_section",
                         captions=["Look up any stock or index", "What to buy",
                                   "What the big money is doing", "The macro tape"])
