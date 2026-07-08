@@ -3628,15 +3628,23 @@ if _mode == "🌍 Reports":
     v = v.copy()
     v["_dt"] = pd.to_datetime(v["date"], errors="coerce", dayfirst=True)
     v = v.sort_values("_dt", ascending=False, na_position="last").drop(columns="_dt").reset_index(drop=True)
+    # live current price (latest close) + expected profit vs target — the "should I invest?" number
+    _curmap = {s: _cur_price(s) for s in v["symbol"].dropna().astype(str).unique() if s and not s.isdigit()}
+    v["current"] = v["symbol"].map(_curmap)
+    _tn = pd.to_numeric(v["target"], errors="coerce"); _cn = pd.to_numeric(v["current"], errors="coerce")
+    v["exp_profit_pct"] = ((_tn - _cn) / _cn * 100).where(_cn > 0).round(2)
     _m = st.columns(3)
     _m[0].metric("Reports shown", len(v))
     _m[1].metric("Recent upgrades", int((_rr["kind"] == "upgrade").sum()))
     _m[2].metric("Recent downgrades", int((_rr["kind"] == "downgrade").sum()))
-    if not v.empty and v["upside_pct"].notna().any():
-        _b = v.loc[v["upside_pct"].idxmax()]
-        st.success(f"🏆 Highest broker upside here: **{_b['name']} ({_b['symbol']})** — {_b['broker']} "
-                   f"target ₹{_b['target']} · **+{_b['upside_pct']:.0f}%**")
-    _show = ["date", "symbol", "name", "broker", "call", "target", "upside_pct", "kind", "trendlyne_url", "pdf"]
+    _rank = v["exp_profit_pct"].fillna(pd.to_numeric(v["upside_pct"], errors="coerce")) if not v.empty else v.get("exp_profit_pct")
+    if not v.empty and _rank.notna().any():
+        _bi = _rank.idxmax(); _b = v.loc[_bi]
+        _cur_txt = f" vs ₹{_b['current']:,.0f} now" if pd.notna(_b.get("current")) else ""
+        st.success(f"🏆 Highest expected profit here: **{_b['name']} ({_b['symbol']})** — {_b['broker']} "
+                   f"target ₹{_b['target']}{_cur_txt} · **+{_rank.loc[_bi]:.0f}%**")
+    _show = ["date", "symbol", "name", "broker", "call", "current", "target", "exp_profit_pct",
+             "kind", "trendlyne_url", "pdf"]
     st.dataframe(filter_ui(v[[c for c in _show if c in v.columns]], "rr_tbl"), hide_index=True,
                  use_container_width=True, height=520, column_config={
                      "date": st.column_config.TextColumn("Date"),
@@ -3644,8 +3652,10 @@ if _mode == "🌍 Reports":
                      "name": st.column_config.TextColumn("Stock", width="medium"),
                      "broker": st.column_config.TextColumn("Broker"),
                      "call": st.column_config.TextColumn("Call"),
+                     "current": st.column_config.NumberColumn("Now ₹", format="%.0f"),
                      "target": st.column_config.TextColumn("Target ₹"),
-                     "upside_pct": st.column_config.NumberColumn("Upside %", format="%.1f%%"),
+                     "exp_profit_pct": st.column_config.NumberColumn("Exp profit %", format="%.1f%%",
+                         help="(target − current price) ÷ current price, using the latest close."),
                      "kind": st.column_config.TextColumn("Type"),
                      "trendlyne_url": st.column_config.LinkColumn("Trendlyne", display_text="view"),
                      "pdf": st.column_config.LinkColumn("PDF", display_text="open")})
