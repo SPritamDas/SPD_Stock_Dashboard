@@ -2195,15 +2195,22 @@ if _mode == "⭐ Superstars":
     _mkt = fetch_market_bulkblock()
     if not _mkt.empty and "symbol" in _mkt.columns:
         _mkt = _mkt.copy()
-        _mkt["_dt"] = pd.to_datetime(_mkt["date"], format="mixed", dayfirst=True, errors="coerce")
+        if "exchange" not in _mkt.columns:          # legacy rows (pre-BSE) were all NSE
+            _mkt["exchange"] = "NSE"
+        _mkt["exchange"] = _mkt["exchange"].astype(str).str.upper().replace({"": "NSE", "NAN": "NSE"})
+        # the notebook writes canonical ISO ("YYYY-MM-DD") for both exchanges → parse WITHOUT dayfirst
+        # (dayfirst=True mangles ISO: "2026-07-08" → 2026-08-07).
+        _mkt["_dt"] = pd.to_datetime(_mkt["date"].astype(str).str.strip(), errors="coerce")
         _latest_d = _mkt["_dt"].max()
-        with st.expander(f"📅  Today's / recent bulk & block deals — market-wide  ·  {len(_mkt)} deals "
+        _exs = sorted(_mkt["exchange"].dropna().unique())
+        with st.expander(f"📅  Today's / recent bulk & block deals — market-wide (NSE + BSE)  ·  {len(_mkt)} deals "
                          f"(latest {_latest_d.date() if pd.notna(_latest_d) else '—'})"):
-            _mc1 = st.columns([3, 2, 2])
+            _mc1 = st.columns([3, 2, 2, 2])
             _mq = _mc1[0].text_input("🔎 Search stock / client", key="mkt_q").strip().lower()
             _days = [str(pd.Timestamp(d).date()) for d in sorted(_mkt["_dt"].dropna().unique(), reverse=True)[:10]]
             _mdt = _mc1[1].selectbox("Day", ["All"] + _days, key="mkt_day")
-            _mside = _mc1[2].multiselect("Side", ["BUY", "SELL"], key="mkt_side")
+            _mexch = _mc1[2].multiselect("Exchange", _exs, key="mkt_exch")
+            _mside = _mc1[3].multiselect("Side", ["BUY", "SELL"], key="mkt_side")
             _mv = _mkt
             if _mq:
                 _mv = _mv[_mv.apply(lambda r: _mq in str(r.get("symbol", "")).lower()
@@ -2211,15 +2218,20 @@ if _mode == "⭐ Superstars":
                                     or _mq in str(r.get("client", "")).lower(), axis=1)]
             if _mdt != "All":
                 _mv = _mv[_mv["_dt"].astype(str).str.startswith(_mdt)]
+            if _mexch:
+                _mv = _mv[_mv["exchange"].isin(_mexch)]
             if _mside:
                 _mv = _mv[_mv["action"].astype(str).str.upper().isin(_mside)]
             _mv = _mv.sort_values("_dt", ascending=False)
-            st.caption(f"Showing **{len(_mv)}** of {len(_mkt)} market-wide deals. Refreshed nightly by the notebook.")
+            _nn, _nb = int((_mv["exchange"] == "NSE").sum()), int((_mv["exchange"] == "BSE").sum())
+            st.caption(f"Showing **{len(_mv)}** of {len(_mkt)} market-wide deals (NSE {_nn} · BSE {_nb}). "
+                       "Refreshed nightly by the notebook. BSE stocks show their BSE ticker/short name.")
             st.dataframe(
-                _mv[[c for c in ["date", "symbol", "company", "client", "action", "qty", "price", "deal_type"]
+                _mv[[c for c in ["date", "exchange", "symbol", "company", "client", "action", "qty", "price", "deal_type"]
                      if c in _mv.columns]],
                 hide_index=True, use_container_width=True, height=360, column_config={
-                    "date": st.column_config.TextColumn("Date"), "symbol": st.column_config.TextColumn("Symbol"),
+                    "date": st.column_config.TextColumn("Date"), "exchange": st.column_config.TextColumn("Exch"),
+                    "symbol": st.column_config.TextColumn("Symbol"),
                     "company": st.column_config.TextColumn("Stock"), "client": st.column_config.TextColumn("Client"),
                     "action": st.column_config.TextColumn("Side"), "qty": st.column_config.TextColumn("Qty"),
                     "price": st.column_config.TextColumn("Price ₹"), "deal_type": st.column_config.TextColumn("Type")})
