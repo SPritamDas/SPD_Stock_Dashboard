@@ -334,10 +334,12 @@ def fetch_portfolio_history_tab():
     return _read_fii_tab("superstar_portfolio_history")
 
 
-# benchmark indices for the portfolio-vs-index chart (yfinance symbols; smallcap/midcap are proxies
-# — Yahoo's Nifty index coverage is partial, so the chart falls back to Nifty 50 if one is missing).
-_INDEX_SYMBOLS = {"Nifty 50": "^NSEI", "Nifty Smallcap (proxy)": "^CNXSC",
-                  "Nifty Midcap (proxy)": "^NSEMDCP50", "Sensex": "^BSESN"}
+# benchmark indices for the portfolio-vs-index chart — the SAME real Indian indices the 🌐 Indices
+# tab uses (core.INDICES), so any Nifty index (Smallcap/Midcap/Bank/sectorals) is a valid benchmark.
+_INDEX_SYMBOLS = {i["name"].title(): i["ticker"] for i in core.INDICES
+                  if i.get("region") == "Indian" and "VIX" not in i["name"].upper()}
+if not _INDEX_SYMBOLS:                                            # safety fallback
+    _INDEX_SYMBOLS = {"Nifty 50": "^NSEI"}
 
 
 @st.cache_data(show_spinner=False, ttl=21600)
@@ -355,6 +357,28 @@ def _index_hist(symbol, start, end):
         return s.dropna()
     except Exception:
         return pd.Series(dtype=float)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _index_daychange(symbol):
+    """(last_close, %chg-from-prev-close, date) for an index via yfinance; (None,None,None) on failure."""
+    try:
+        import yfinance as yf
+        d = yf.download(symbol, period="7d", progress=False, auto_adjust=True)
+        if d is None or d.empty:
+            return (None, None, None)
+        c = d["Close"]
+        if hasattr(c, "columns"):
+            c = c.iloc[:, 0]
+        c = c.dropna()
+        if len(c) < 1:
+            return (None, None, None)
+        if len(c) < 2:
+            return (float(c.iloc[-1]), None, c.index[-1])
+        last, prev = float(c.iloc[-1]), float(c.iloc[-2])
+        return (last, (last / prev - 1) * 100.0, c.index[-1])
+    except Exception:
+        return (None, None, None)
 
 
 # raw column name -> the SAME friendly label shown in each table's header, so the filter dropdowns
@@ -2722,11 +2746,17 @@ if _mode == "⭐ Superstars":
                    "*net-worth* changes (contaminated by capital flows) — treat as **directional**, and verify "
                    "any name in **Stock Analysis** before acting.")
 
-    # ---- 🏆 leaderboard — top investors by alpha (visual, from the current filter) ----
+    # ---- 🏆 leaderboard — shows once you filter (else the raw all-investor list is dominated by
+    #      net-worth-alpha outliers and isn't meaningful) ----
+    _filtered = bool(_q) or bool(_sigs) or bool(_types) or any(
+        x is not None for x in (_minsh, _minal, _minann, _mindd))
     _lb = view.copy()
     _lb["_a"] = pd.to_numeric(_lb.get("alpha_ann_pct"), errors="coerce")
     _lb = _lb.dropna(subset=["_a"]).sort_values("_a", ascending=False).head(15)
-    if len(_lb) >= 2:
+    if not _filtered:
+        st.caption("🏆 Apply a filter above (Signal / Type / Min Sharpe …) to see the **alpha leaderboard** "
+                   "for that set.")
+    if _filtered and len(_lb) >= 2:
         st.markdown("#### 🏆 Leaderboard — alpha vs Nifty")
         import plotly.graph_objects as _go
         _lbr = _lb.iloc[::-1]                                  # highest on top in a horizontal bar
@@ -2806,8 +2836,8 @@ if _mode == "⭐ Superstars":
         if len(_pmine) >= 2:
             st.markdown("#### 📈 Portfolio value vs index")
             _bm = st.selectbox("Benchmark", list(_INDEX_SYMBOLS), key=f"bm_{_pick}",
-                               help="Compare growth against an index. Smallcap/Midcap are Yahoo proxies "
-                                    "(partial coverage); falls back to portfolio-only if unavailable.")
+                               help="Compare growth against any Indian index (same list as the 🌐 Indices tab). "
+                                    "If an investor is small-cap heavy, pick Nifty Smallcap 100.")
             _pmine["_reb"] = _pmine["_nw"] / _pmine["_nw"].iloc[0] * 100.0
             import plotly.graph_objects as _go
             _pfig = _go.Figure()
@@ -2816,8 +2846,8 @@ if _mode == "⭐ Superstars":
                             marker=dict(size=4)))
             _idx = _index_hist(_INDEX_SYMBOLS[_bm], _pmine["_dt"].min(), _pmine["_dt"].max() + pd.Timedelta(days=4))
             if not _idx.empty:
-                _u = _idx.reindex(_idx.index.union(pd.DatetimeIndex(_pmine["_dt"]))).sort_index().ffill()
-                _bm_at = _u.reindex(pd.DatetimeIndex(_pmine["_dt"]))
+                _uidx = _idx.reindex(_idx.index.union(pd.DatetimeIndex(_pmine["_dt"]))).sort_index().ffill()
+                _bm_at = _uidx.reindex(pd.DatetimeIndex(_pmine["_dt"]))
                 if _bm_at.dropna().shape[0] >= 2:
                     _bm_reb = _bm_at / _bm_at.dropna().iloc[0] * 100.0
                     _pfig.add_trace(_go.Scatter(x=_pmine["_dt"], y=_bm_reb.values, name=_bm,
@@ -3476,15 +3506,17 @@ if _mode == "🌍 FII/DII":
     if _n:
         _piv = _piv.tail(_n)
     import plotly.graph_objects as _go
+    _xlab = [pd.Timestamp(d).strftime("%d %b %y") for d in _piv.index]   # category labels → uniform bars
     _fig = _go.Figure()
     if "FII" in _piv.columns:
-        _fig.add_bar(x=_piv.index, y=_piv["FII"], name="FII / FPI", marker_color="#6AA6FF")
+        _fig.add_bar(x=_xlab, y=_piv["FII"], name="FII / FPI", marker_color="#6AA6FF")
     if "DII" in _piv.columns:
-        _fig.add_bar(x=_piv.index, y=_piv["DII"], name="DII", marker_color="#E3B341")
+        _fig.add_bar(x=_xlab, y=_piv["DII"], name="DII", marker_color="#E3B341")
     _fig.update_layout(barmode="group", template="plotly_dark", height=400,
                        margin=dict(l=8, r=8, t=28, b=8), paper_bgcolor="rgba(0,0,0,0)",
                        plot_bgcolor="rgba(0,0,0,0)", legend=dict(orientation="h", y=1.12, x=0),
-                       yaxis_title="Net ₹ crore", bargap=0.25, bargroupgap=0.1)
+                       yaxis_title="Net ₹ crore", bargap=0.35, bargroupgap=0.12,
+                       xaxis=dict(type="category"), font=dict(family="Inter, sans-serif"))
     _fig.add_hline(y=0, line_color="#3A3F49", line_width=1)
     st.plotly_chart(_fig, use_container_width=True, config={"displaylogo": False})
     with st.expander("📄 Raw daily figures"):
@@ -3505,28 +3537,43 @@ if _mode == "🌍 IPOs":
         st.stop()
     _ipo = _ipo.copy()
     _ipo["gmp_expected_pct"] = pd.to_numeric(_ipo["gmp_expected_pct"], errors="coerce")
-    st.caption("Open & upcoming IPOs with **GMP / expected listing gain %** from investorgain "
-               "(**unofficial grey-market estimate — indicative only**), enriched with NSE symbol, live "
-               "subscription & status where the names match.")
-    _mrow = st.columns(3)
-    _mrow[0].metric("IPOs tracked", len(_ipo))
-    if _ipo["gmp_expected_pct"].notna().any():
-        _best = _ipo.loc[_ipo["gmp_expected_pct"].idxmax()]
-        _mrow[1].metric("Highest GMP", f"{_best['gmp_expected_pct']:.0f}%", delta=str(_best['name'])[:22])
-    _mrow[2].metric("NSE-matched", int((_ipo["nse_matched"] == "yes").sum()))
-    _fc = st.columns([2, 2, 4])
+    st.caption("IPOs with **GMP / expected listing gain %** from investorgain (**unofficial grey-market "
+               "estimate — indicative only**), enriched with NSE symbol/subscription/status where matched. "
+               "Default view: **Mainboard, active & upcoming**.")
+    # filters — default to Mainboard ('IPO'), active + upcoming only
+    _fc = st.columns([2, 2, 3])
     _cats = sorted(x for x in _ipo["category"].dropna().astype(str).unique() if x.strip())
-    _cat = _fc[0].multiselect("Board", _cats, key="ipo_cat")
+    _cat = _fc[0].multiselect("Board", _cats, default=(["IPO"] if "IPO" in _cats else []), key="ipo_cat",
+                              help="Mainboard = 'IPO'; SME is separate. Default = Mainboard.")
+    _active_only = _fc[1].checkbox("Active & upcoming only", value=True, key="ipo_active",
+                                   help="Hide IPOs that have already closed / listed.")
     _q = _fc[2].text_input("🔎 Search IPO", key="ipo_q").strip().lower()
-    v = _ipo
+    v = _ipo.copy()
     if _cat:
         v = v[v["category"].astype(str).isin(_cat)]
+    if _active_only:
+        v = v[v["status"].astype(str).str.lower().isin(["open", "active", "upcoming"])]
     if _q:
         v = v[v["name"].astype(str).str.lower().str.contains(_q, na=False)]
+    v = v.sort_values("gmp_expected_pct", ascending=False, na_position="last").reset_index(drop=True)
+    # metrics + highlight over the FILTERED set (so "Highest" respects Board/active)
+    _mrow = st.columns(3)
+    _mrow[0].metric("IPOs shown", len(v))
+    if not v.empty and v["gmp_expected_pct"].notna().any():
+        _best = v.loc[v["gmp_expected_pct"].idxmax()]
+        _mrow[1].metric("Highest expected gain", f"{_best['gmp_expected_pct']:.0f}%",
+                        delta=str(_best["name"])[:24])
+    _mrow[2].metric("NSE-matched", int((v["nse_matched"] == "yes").sum()))
+    if not v.empty and v["gmp_expected_pct"].notna().any():
+        st.success(f"🏆 **Best expected listing gain here: {_best['name']}** — GMP ≈ "
+                   f"**{_best['gmp_expected_pct']:.0f}%** · {_best.get('category', '')} · "
+                   f"opens {_best.get('open_date', '—')} · closes {_best.get('close_date', '—')}")
+    if v.empty:
+        st.info("No IPOs match — clear a filter or untick **Active & upcoming only** to see closed/listed ones.")
     _show = ["name", "symbol", "category", "status", "price_band", "gmp_expected_pct",
              "subscription_x", "est_listing_date", "open_date", "close_date", "lot", "rating"]
     st.dataframe(filter_ui(v[[c for c in _show if c in v.columns]], "ipo_tbl"),
-                 hide_index=True, use_container_width=True, height=560, column_config={
+                 hide_index=True, use_container_width=True, height=520, column_config={
                      "name": st.column_config.TextColumn("IPO", width="large"),
                      "symbol": st.column_config.TextColumn("NSE"),
                      "category": st.column_config.TextColumn("Board"),
@@ -3546,6 +3593,18 @@ if _mode == "🌍 IPOs":
 
 if _mode == "🌍 Today":
     st.markdown("## 📅 Markets today — the tape at a glance")
+    # -- index snapshot (day change) --
+    st.markdown("#### 📈 Index snapshot · today")
+    _IDX_TODAY = {"Nifty 50": "^NSEI", "Sensex": "^BSESN", "Bank Nifty": "^NSEBANK",
+                  "Nifty Midcap 100": "NIFTY_MIDCAP_100.NS", "Nifty Smallcap 100": "^CNXSC"}
+    _ic = st.columns(len(_IDX_TODAY))
+    for _i, (_nm, _sym) in enumerate(_IDX_TODAY.items()):
+        _lc, _pc, _idt = _index_daychange(_sym)
+        if _lc is not None:
+            _ic[_i].metric(_nm, f"{_lc:,.0f}", delta=(f"{_pc:+.2f}%" if _pc is not None else None))
+        else:
+            _ic[_i].metric(_nm, "—")
+    st.markdown("---")
     _flow = fetch_fii_dii_flow()
     if not _flow.empty and "net_cr" in _flow.columns:
         _flow = _flow.copy()
