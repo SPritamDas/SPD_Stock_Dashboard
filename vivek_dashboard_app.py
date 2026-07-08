@@ -3649,9 +3649,12 @@ if _mode == "🌍 Reports":
         st.info("No research reports yet — run the notebook (`build_research_reports`).")
         st.stop()
     _rr = _rr.copy()
-    _rr["upside_pct"] = pd.to_numeric(_rr["upside_pct"], errors="coerce")
-    st.caption("Latest sell-side **broker calls** — target price, upside vs current, and recent "
-               "**upgrades / downgrades** (Trendlyne). Broker opinions, not advice.")
+    for _c in ("upside_pct", "price_at_reco", "since_reco_pct"):
+        if _c in _rr.columns:
+            _rr[_c] = pd.to_numeric(_rr[_c], errors="coerce")
+    st.caption("Latest sell-side **broker calls** with a **track-record check**: price on the report day, "
+               "the upside the broker projected *then*, and how the stock has *actually* moved since — so you "
+               "can see if the call played out. (Trendlyne; opinions, not advice.)")
     _fc = st.columns([2, 2, 3])
     _kind = _fc[0].multiselect("Type", sorted(_rr["kind"].dropna().astype(str).unique()), key="rr_kind",
                                help="high-upside · report · upgrade · downgrade")
@@ -3683,8 +3686,8 @@ if _mode == "🌍 Reports":
         _cur_txt = f" vs ₹{_b['current']:,.0f} now" if pd.notna(_b.get("current")) else ""
         st.success(f"🏆 Highest expected profit here: **{_b['name']} ({_b['symbol']})** — {_b['broker']} "
                    f"target ₹{_b['target']}{_cur_txt} · **+{_rank.loc[_bi]:.0f}%**")
-    _show = ["date", "symbol", "name", "broker", "call", "current", "target", "exp_profit_pct",
-             "kind", "trendlyne_url", "pdf"]
+    _show = ["date", "symbol", "name", "broker", "call", "price_at_reco", "upside_pct", "since_reco_pct",
+             "current", "target", "exp_profit_pct", "kind", "trendlyne_url", "pdf"]
     st.dataframe(filter_ui(v[[c for c in _show if c in v.columns]], "rr_tbl"), hide_index=True,
                  use_container_width=True, height=520, column_config={
                      "date": st.column_config.TextColumn("Date"),
@@ -3692,10 +3695,16 @@ if _mode == "🌍 Reports":
                      "name": st.column_config.TextColumn("Stock", width="medium"),
                      "broker": st.column_config.TextColumn("Broker"),
                      "call": st.column_config.TextColumn("Call"),
+                     "price_at_reco": st.column_config.NumberColumn("@ report ₹", format="%.0f",
+                         help="Stock price on the day the report was published."),
+                     "upside_pct": st.column_config.NumberColumn("Exp then %", format="%.1f%%",
+                         help="Upside the broker projected AT the report (target vs report-day price)."),
+                     "since_reco_pct": st.column_config.NumberColumn("Since reco %", format="%.1f%%",
+                         help="How the stock has ACTUALLY moved since the report — the track-record check."),
                      "current": st.column_config.NumberColumn("Now ₹", format="%.0f"),
                      "target": st.column_config.TextColumn("Target ₹"),
-                     "exp_profit_pct": st.column_config.NumberColumn("Exp profit %", format="%.1f%%",
-                         help="(target − current price) ÷ current price, using the latest close."),
+                     "exp_profit_pct": st.column_config.NumberColumn("Exp now %", format="%.1f%%",
+                         help="Upside remaining from HERE (target − current price) ÷ current price, latest close."),
                      "kind": st.column_config.TextColumn("Type"),
                      "trendlyne_url": st.column_config.LinkColumn("Trendlyne", display_text="view"),
                      "pdf": st.column_config.LinkColumn("PDF", display_text="open")})
