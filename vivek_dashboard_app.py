@@ -310,9 +310,104 @@ def fetch_superstar_insider():
 
 @st.cache_data(show_spinner=False, ttl=21600)
 def fetch_market_bulkblock():
-    """Market-wide (all-market) recent NSE bulk & block deals, written by the notebook →
+    """Market-wide (all-market) recent NSE + BSE bulk & block deals, written by the notebook →
     the '📅 Today's deals' browser (not filtered to superstars)."""
     return _read_fii_tab("market_bulkblock_deals")
+
+
+def _quality_meta(summ):
+    """{investor_lower: {signal, alpha, sharpe, maxdd}} for QUALITY superstars ONLY — the exact bar
+    superstar_stock_scores() uses: signal BUY/STRONG BUY · Sharpe >= 0.4 · Max DD >= -40."""
+    if summ is None or summ.empty or "name" not in summ.columns:
+        return {}
+    sh = pd.to_numeric(summ.get("sharpe_ratio"), errors="coerce")
+    dd = pd.to_numeric(summ.get("max_drawdown_pct"), errors="coerce")
+    al = pd.to_numeric(summ.get("alpha_ann_pct"), errors="coerce")
+    sig = summ.get("signal", pd.Series(index=summ.index, dtype=object)).astype(str)
+    qual = sig.isin(["STRONG BUY", "BUY"]) & (sh >= 0.4) & (dd >= -40)
+    out = {}
+    for i in summ.index[qual.fillna(False)]:
+        out[str(summ.at[i, "name"]).strip().lower()] = {
+            "signal": sig.at[i], "alpha": al.at[i], "sharpe": sh.at[i], "maxdd": dd.at[i]}
+    return out
+
+
+@st.cache_data(show_spinner="Merging quality-superstar disclosures…", ttl=21600)
+def build_quality_moves(days=None):
+    """ONE chronological feed of every SAST + bulk + block + insider disclosure made by a QUALITY
+    superstar, across NSE **and** BSE — so the user never has to open each portfolio. Filters the
+    three per-investor feeds to the qualifying set and normalizes them to a common schema.
+    Returns (df, meta). df columns: date/_dt · investor · signal · source(SAST/Bulk/Block/Insider) ·
+    side(BUY/SELL) · stock · ticker · exchange · detail · conf. Newest first."""
+    summ = fetch_superstar_summary()
+    meta = _quality_meta(summ)
+    if not meta:
+        return pd.DataFrame(), {}
+    qnames = set(meta)
+
+    def _num(x):
+        return pd.to_numeric(x, errors="coerce")
+
+    def _qty(v):
+        n = pd.to_numeric(v, errors="coerce")
+        return f"{int(n):,}" if pd.notna(n) else str(v)
+
+    def _mine(df):
+        return (df is not None and not df.empty and "investor" in df.columns
+                and df[df["investor"].astype(str).str.strip().str.lower().isin(qnames)].copy()) or pd.DataFrame()
+
+    rows = []
+    # --- bulk & block (already spans NSE + BSE via the exchange column) ---
+    b = _mine(fetch_superstar_bulkblock())
+    for _, r in (b.iterrows() if not b.empty else []):
+        p = _num(r.get("pct_traded"))
+        det = f"{_qty(r.get('qty'))} sh @ ₹{r.get('price')}" + (f" · {p:.2f}% of co" if pd.notna(p) else "")
+        rows.append({"date": r.get("date"), "investor": r.get("investor"),
+                     "source": (str(r.get("deal_type", "")).strip().title() or "Bulk"),
+                     "side": str(r.get("action", "")).upper().strip(),
+                     "stock": r.get("company"), "ticker": r.get("ticker"),
+                     "exchange": str(r.get("exchange", "")).upper().strip(),
+                     "detail": det, "conf": r.get("confidence")})
+    # --- SAST Reg 29 (NSE) ---
+    s = _mine(fetch_superstar_sast())
+    for _, r in (s.iterrows() if not s.empty else []):
+        act = str(r.get("action", "")).strip().lower()
+        side = "BUY" if act.startswith("acq") else ("SELL" if act.startswith("sal") else act.upper())
+        pt, pa = _num(r.get("pct_traded")), _num(r.get("pct_after"))
+        det = f"Δ{pt:.2f}% → {pa:.2f}% held" if pd.notna(pt) and pd.notna(pa) else ""
+        rt = str(r.get("reg_type", "")).strip()
+        det = ((det + " " if det else "") + f"[{rt}]") if rt else (det or "—")
+        rows.append({"date": r.get("filed"), "investor": r.get("investor"), "source": "SAST",
+                     "side": side, "stock": r.get("company"), "ticker": r.get("symbol"),
+                     "exchange": "NSE", "detail": det, "conf": r.get("confidence")})
+    # --- insider / PIT (Trendlyne per-investor; can include SAST-family disclosures too) ---
+    n = _mine(fetch_superstar_insider())
+    for _, r in (n.iterrows() if not n.empty else []):
+        act = str(r.get("action", "")).strip().lower()
+        side = "BUY" if act.startswith("acq") else ("SELL" if act.startswith("dis") else act.upper())
+        ha = _num(r.get("holding_after"))
+        det = f"{_qty(r.get('qty'))} sh" + (f" → {ha:.2f}% held" if pd.notna(ha) else "")
+        reg = str(r.get("regulation", "")).strip()
+        det = (det + f" [{reg}]") if reg else det
+        rows.append({"date": r.get("report_date"), "investor": r.get("investor"), "source": "Insider",
+                     "side": side, "stock": r.get("company"), "ticker": r.get("ticker"),
+                     "exchange": "", "detail": det, "conf": r.get("confidence")})
+
+    if not rows:
+        return pd.DataFrame(), meta
+    d = pd.DataFrame(rows)
+    # feeds mix formats (full month "08-July-2026", abbrev "6-Jul-2026", ISO "2026-07-07"); all are
+    # unambiguous (month-name or year-first) so format="mixed" infers each row WITHOUT dayfirst (which
+    # would mangle ISO). A bare to_datetime would lock the first row's format and NaT most of the rest.
+    d["_dt"] = pd.to_datetime(d["date"].astype(str).str.strip(), format="mixed", errors="coerce")
+    d["signal"] = d["investor"].map(lambda x: meta.get(str(x).strip().lower(), {}).get("signal", ""))
+    d["alpha"] = d["investor"].map(lambda x: meta.get(str(x).strip().lower(), {}).get("alpha"))
+    d = d.drop_duplicates(subset=["investor", "ticker", "_dt", "side", "source", "detail"])
+    if days:
+        _cut = pd.Timestamp.now().normalize() - pd.Timedelta(days=int(days))
+        d = d[d["_dt"].isna() | (d["_dt"] >= _cut)]
+    d = d.sort_values("_dt", ascending=False, na_position="last").reset_index(drop=True)
+    return d, meta
 
 
 @st.cache_data(show_spinner=False, ttl=21600)
@@ -2578,10 +2673,91 @@ if _mode == "🔔 Alerts":
                      help="Re-read the FII/DII summary, history & master_stock."):
             fetch_superstar_summary.clear(); fetch_superstar_history.clear()
             fetch_master_stock.clear(); fetch_superstar_moves.clear()
+            fetch_superstar_sast.clear(); fetch_superstar_bulkblock.clear()
+            fetch_superstar_insider.clear(); build_quality_moves.clear()
             st.rerun()
         st.caption("Alerts read the FII/DII sheet (run the notebook to refresh the underlying data).")
 
     st.markdown("## 🔔 FII/DII alerts — quality superstar buys (vs **Nifty 50**)")
+
+    # ---- ⭐ QUALITY-SUPERSTAR LIVE MOVES — every SAST/bulk/block/insider deal by a quality name ----
+    # The one place to glance: any disclosure (NSE + BSE) by an investor who passes the quality bar,
+    # newest first, so you never open portfolios one by one.
+    _qm, _qmeta = build_quality_moves(days=None)
+    st.markdown("### ⭐ Quality-superstar moves — live disclosures (NSE + BSE)")
+    if not _qmeta:
+        st.info("No superstar currently passes the quality bar (signal **BUY/STRONG BUY** · Sharpe **≥ 0.4** · "
+                "Max DD **≥ −40**) — nothing to surface here. Loosen the bar on the ⭐ Superstars page to inspect names.")
+    elif _qm.empty:
+        st.info(f"The **{len(_qmeta)}** quality superstars have **no** disclosed SAST / bulk / block / insider deal on "
+                "record yet. Re-run the notebook (or press 🔄 Refresh alerts) after the next NSE/BSE posting.")
+    else:
+        _qnames_disp = ", ".join(sorted({str(n).title() for n in _qmeta})[:8]) + \
+                       ("…" if len(_qmeta) > 8 else "")
+        st.caption(f"Every SAST · bulk · block · insider disclosure by the **{len(_qmeta)}** investors who pass your "
+                   "quality bar (**signal BUY/STRONG BUY · Sharpe ≥ 0.4 · Max DD ≥ −40**), newest first — so you never "
+                   "open each portfolio. Bulk/block covers **both exchanges**; SAST is NSE Reg 29; insider is PIT/SAST "
+                   f"(a Reg-29 crossing can appear under both **SAST** and **Insider**). Quality names: {_qnames_disp}")
+        _fc = st.columns([2, 2, 2, 2, 3])
+        _win = _fc[0].selectbox("Window", ["30d", "60d", "90d", "180d", "All"], index=3, key="qm_win")
+        _srcs = _fc[1].multiselect("Source", sorted(_qm["source"].dropna().unique()), key="qm_src")
+        _sides = _fc[2].multiselect("Side", ["BUY", "SELL"], key="qm_side")
+        _exopts = [e for e in ["NSE", "BSE"] if e in set(_qm["exchange"].astype(str))]
+        _exs = _fc[3].multiselect("Exchange", _exopts, key="qm_exch")
+        _qq = _fc[4].text_input("🔎 Search investor / stock", key="qm_q").strip().lower()
+        v = _qm.copy()
+        if _win != "All":
+            _cut = pd.Timestamp.now().normalize() - pd.Timedelta(days={"30d": 30, "60d": 60, "90d": 90, "180d": 180}[_win])
+            v = v[v["_dt"].isna() | (v["_dt"] >= _cut)]
+        if _srcs:
+            v = v[v["source"].isin(_srcs)]
+        if _sides:
+            v = v[v["side"].isin(_sides)]
+        if _exs:
+            v = v[v["exchange"].isin(_exs)]
+        if _qq:
+            v = v[v.apply(lambda r: _qq in str(r.get("investor", "")).lower()
+                          or _qq in str(r.get("stock", "")).lower()
+                          or _qq in str(r.get("ticker", "")).lower(), axis=1)]
+        _nb, _ns = int((v["side"] == "BUY").sum()), int((v["side"] == "SELL").sum())
+        _mc = st.columns(4)
+        _mc[0].metric("Moves shown", len(v))
+        _mc[1].metric("Investors", int(v["investor"].nunique()))
+        _mc[2].metric("Stocks", int(v["stock"].nunique()))
+        _mc[3].metric("Buys / Sells", f"{_nb} / {_ns}")
+        _disp = v.copy()
+        _disp["investor"] = _disp["investor"].astype(str).str.title()
+        _disp["_d"] = _disp["_dt"].dt.date.astype(str).where(_disp["_dt"].notna(), _disp["date"].astype(str))
+        _show = ["_d", "investor", "signal", "source", "side", "stock", "ticker", "exchange", "detail", "conf"]
+        st.dataframe(_disp[[c for c in _show if c in _disp.columns]], hide_index=True,
+                     use_container_width=True, height=460, column_config={
+                         "_d": st.column_config.TextColumn("Date"),
+                         "investor": st.column_config.TextColumn("Investor"),
+                         "signal": st.column_config.TextColumn("Signal"),
+                         "source": st.column_config.TextColumn("Via"),
+                         "side": st.column_config.TextColumn("Side"),
+                         "stock": st.column_config.TextColumn("Stock"),
+                         "ticker": st.column_config.TextColumn("Ticker"),
+                         "exchange": st.column_config.TextColumn("Exch"),
+                         "detail": st.column_config.TextColumn("Details", width="large"),
+                         "conf": st.column_config.TextColumn("Match")})
+        # roll-up: stocks BOUGHT by ≥2 quality superstars in the current view — the strongest signal
+        _roll = (v[v["side"] == "BUY"].groupby(["stock", "ticker"], dropna=False).agg(
+                    investors=("investor", "nunique"),
+                    who=("investor", lambda x: ", ".join(sorted({str(i).title() for i in x})[:6])),
+                    latest=("_dt", "max")).reset_index())
+        _roll = _roll[_roll["investors"] >= 2].sort_values(["investors", "latest"], ascending=False)
+        if not _roll.empty:
+            with st.expander(f"🔥 Stocks BOUGHT by ≥2 quality superstars in this window ({len(_roll)})", expanded=True):
+                _roll["latest"] = pd.to_datetime(_roll["latest"], errors="coerce").dt.date.astype(str)
+                st.dataframe(_roll[["stock", "ticker", "investors", "who", "latest"]], hide_index=True,
+                             use_container_width=True, column_config={
+                                 "stock": st.column_config.TextColumn("Stock"),
+                                 "ticker": st.column_config.TextColumn("Ticker"),
+                                 "investors": st.column_config.NumberColumn("# Quality buyers"),
+                                 "who": st.column_config.TextColumn("Who"),
+                                 "latest": st.column_config.TextColumn("Latest buy")})
+    st.markdown("---")
 
     # ---- 📢 PORTFOLIO QUARTER UPDATES — WHICH investors just advanced to a newer disclosed quarter ----
     # Per-investor change detection: the notebook diffs each investor's data_to run-over-run and logs
