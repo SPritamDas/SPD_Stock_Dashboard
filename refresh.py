@@ -185,10 +185,16 @@ def fetch_one(ticker, years=YEARS):
 
 def _parallel(fn, tickers, label, workers=10):
     out = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(fn, t): t for t in tickers}
-        done = 0
-        for fut in concurrent.futures.as_completed(futs):
+    # yfinance calls have no explicit socket timeout, so a single stuck connection could otherwise
+    # wedge as_completed (and the executor's blocking shutdown) FOREVER. Cap the whole phase with a
+    # generous wall-clock backstop and cancel/abandon the rest on timeout — a hung worker then
+    # degrades to a handful of "misses" (recovered by the retry passes) instead of hanging the build.
+    overall = max(300, 5 * len(tickers))
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+    futs = {ex.submit(fn, t): t for t in tickers}
+    done = 0
+    try:
+        for fut in concurrent.futures.as_completed(futs, timeout=overall):
             t = futs[fut]
             try:
                 out[t] = fut.result()
@@ -197,6 +203,11 @@ def _parallel(fn, tickers, label, workers=10):
             done += 1
             if done % 25 == 0 or done == len(tickers):
                 print(f"  {label}: {done}/{len(tickers)}", flush=True)
+    except concurrent.futures.TimeoutError:
+        print(f"  {label}: wall-clock timeout after {overall}s — {len(tickers) - done} ticker(s) "
+              "unfinished, treated as misses (a hung Yahoo worker won't block the build).", flush=True)
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
     return out
 
 
@@ -262,8 +273,12 @@ def main():
 
     payload = {"groups": groups, "data": data, "fund": fund,
                "built": now, "built_prices": now, "built_fund": now}
-    with open(CACHE_PKL, "wb") as f:
+    # atomic write: dump to a temp file then os.replace() — a crash/kill mid-pickle (this is a big
+    # payload) must NOT leave a truncated pkl that the deployed dashboard would fail to unpickle.
+    _tmp = CACHE_PKL + ".tmp"
+    with open(_tmp, "wb") as f:
         pickle.dump(payload, f)
+    os.replace(_tmp, CACHE_PKL)
     size_mb = os.path.getsize(CACHE_PKL) / 1e6
     print(f"✅ cache written: {len(data)} priced, {len(fund)} fundamentals, "
           f"{size_mb:.1f} MB -> {CACHE_PKL}", flush=True)

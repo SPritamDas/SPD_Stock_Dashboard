@@ -43,8 +43,22 @@ fi
 # --- 1) investor + NSE tabs (the notebook) ---
 log ""
 log "[1/3] Refreshing investor + NSE sheet tabs (notebook)…"
+# timeout=2400 (40 min/cell): generous for the slow-but-legit holdings scrape, but bounds a
+#   hung request so the run can't stall FOREVER (was -1 = infinite → the whole run hung silently).
+# interrupt_on_timeout + --allow-errors: a single blocked/slow cell is interrupted and RECORDED,
+#   then the notebook CONTINUES — so one bad source no longer prevents the other ~20 tabs from
+#   refreshing, and steps [2/3]/[3/3] always run afterwards. (Cells are block-safe: on failure
+#   they preserve last-good data, so --allow-errors is safe here.)
 "$JUP" nbconvert --to notebook --execute fii_dii_investment_pattern.ipynb \
-    --output /tmp/spd_executed.ipynb --ExecutePreprocessor.timeout=-1 2>&1 | tee -a "$LOG"
+    --output /tmp/spd_executed.ipynb \
+    --ExecutePreprocessor.timeout=2400 \
+    --ExecutePreprocessor.interrupt_on_timeout=True \
+    --allow-errors 2>&1 | tee -a "$LOG"
+
+# nbconvert writes each cell's print() output INTO the .ipynb, not to stdout, so the tee'd log
+# above only shows nbconvert's own lines. Surface a concise per-cell summary (what wrote, what
+# ALERTed/aborted, what errored) so a stale tab or a block is VISIBLE in the log, not silent.
+"$PY" nb_summary.py /tmp/spd_executed.ipynb 2>&1 | tee -a "$LOG"
 
 # --- 2) V-universe price / fundamentals / strategy cache ---
 log ""
@@ -54,16 +68,27 @@ log "[2/3] Building V-universe cache (refresh.py)…"
 # --- 3) publish the cache to the GitHub release (for the deployed dashboard) ---
 log ""
 log "[3/3] Publishing cache to the GitHub release…"
-if command -v gh >/dev/null 2>&1 && [ -f vivek_output/dashboard_cache.pkl ]; then
-  if gh release upload data-latest vivek_output/dashboard_cache.pkl --clobber 2>&1 | tee -a "$LOG"; then
-    log "    cache published."
+CACHE="vivek_output/dashboard_cache.pkl"
+if [ ! -f "$CACHE" ]; then
+  log "    (skipped — $CACHE not built; step [2/3] must have failed. Deployed app keeps its last cache.)"
+elif command -v gh >/dev/null 2>&1; then
+  if gh release upload data-latest "$CACHE" --clobber 2>&1 | tee -a "$LOG"; then
+    log "    cache published (via gh)."
   else
-    log "    (upload failed — deployed app keeps its last cache. Try: gh auth login)"
+    log "    (gh upload failed — deployed app keeps its last cache. Try: gh auth login)"
   fi
+elif [ -n "${GH_UPLOAD_TOKEN:-}" ]; then
+  # No gh CLI on this machine → publish via the GitHub REST API (publish_cache.py).
+  # Needs a Contents:Read-WRITE PAT in $GH_UPLOAD_TOKEN (the [github] token in secrets.toml is
+  # Read-only — enough for the app to DOWNLOAD, not to upload).
+  "$PY" publish_cache.py 2>&1 | tee -a "$LOG"
 else
-  log "    (skipped — 'gh' not installed or cache not built. Install gh + 'gh auth login' to publish;"
-  log "     or run the dashboard locally: .venv/bin/streamlit run vivek_dashboard_app.py — it reads the local cache.)"
+  log "    (skipped — no 'gh' CLI and no \$GH_UPLOAD_TOKEN set, so the freshest cache is NOT reaching"
+  log "     the deployed app. To publish from this machine without gh:"
+  log "        export GH_UPLOAD_TOKEN=<fine-grained PAT · Contents:Read-write · this repo only>"
+  log "     then re-run. Or run the dashboard locally — it reads the local cache directly.)"
 fi
 
 log ""
 log "===== done — $(date) · full log: $LOG ====="
+

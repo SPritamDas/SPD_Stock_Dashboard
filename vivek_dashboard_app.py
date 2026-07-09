@@ -93,40 +93,85 @@ def _gspread_client():
     return gspread.authorize(creds)
 
 
-def _try_download_cache_from_release():
-    """On Streamlit Cloud the cache pkl is not in the repo (git-ignored); fetch the
-    nightly-built copy from the GitHub Release asset. Configured via [github] secrets.
-    Silent no-op locally / when unconfigured (the app then builds the cache on demand)."""
+def _gh_cfg():
+    """(repo, token, release_tag, cache_asset) from [github] secrets, or (None, …) if unconfigured."""
     try:
         gh = dict(st.secrets.get("github", {}))
     except Exception:
         gh = {}
-    repo, token = gh.get("repo"), gh.get("token")
+    return (gh.get("repo"), gh.get("token"),
+            gh.get("release_tag", "data-latest"),
+            gh.get("cache_asset", "dashboard_cache.pkl"))
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _release_asset_updated_epoch():
+    """UTC epoch of the release cache asset's `updated_at` (cached 30 min so we hit the GitHub API
+    at most a couple times/hour per container), or None if unconfigured/unavailable. This is what
+    lets a long-lived container notice the nightly rebuild and pull the fresh cache."""
+    repo, token, tag, asset = _gh_cfg()
+    if not (repo and token):
+        return None
+    try:
+        import requests
+        from datetime import timezone
+        h = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+        r = requests.get(f"https://api.github.com/repos/{repo}/releases/tags/{tag}", headers=h, timeout=20)
+        if r.status_code != 200:
+            return None
+        a = next((x for x in r.json().get("assets", []) if x.get("name") == asset), None)
+        if not a or not a.get("updated_at"):
+            return None
+        return datetime.strptime(a["updated_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+    except Exception:
+        return None
+
+
+def _try_download_cache_from_release():
+    """On Streamlit Cloud the cache pkl is not in the repo (git-ignored); fetch the nightly-built
+    copy from the GitHub Release asset. Configured via [github] secrets. Silent no-op locally /
+    when unconfigured (the app then builds the cache on demand). Writes atomically."""
+    repo, token, tag, asset = _gh_cfg()
     if not (repo and token):
         return
-    tag   = gh.get("release_tag", "data-latest")
-    asset = gh.get("cache_asset", "dashboard_cache.pkl")
     try:
         import requests
         h = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
         r = requests.get(f"https://api.github.com/repos/{repo}/releases/tags/{tag}", headers=h, timeout=30)
         if r.status_code != 200:
+            st.session_state["_cache_dl_error"] = f"release HTTP {r.status_code}"
             return
         a = next((x for x in r.json().get("assets", []) if x.get("name") == asset), None)
         if not a:
+            st.session_state["_cache_dl_error"] = f"asset '{asset}' not found on release '{tag}'"
             return
         dl = requests.get(a["url"], headers={"Authorization": f"Bearer {token}",
                                              "Accept": "application/octet-stream"}, timeout=180)
         if dl.status_code == 200 and dl.content:
-            with open(CACHE_PKL, "wb") as f:
+            tmp = CACHE_PKL + ".tmp"
+            with open(tmp, "wb") as f:
                 f.write(dl.content)
-    except Exception:
+            os.replace(tmp, CACHE_PKL)              # atomic — never leave a half-written pkl
+            st.session_state.pop("_cache_dl_error", None)
+        else:
+            st.session_state["_cache_dl_error"] = f"asset download HTTP {dl.status_code}"
+    except Exception as e:
+        st.session_state["_cache_dl_error"] = f"download failed: {e}"
         return
 
 
 def load_cache():
-    if not os.path.exists(CACHE_PKL):
-        _try_download_cache_from_release()      # cloud: pull the nightly-built cache if absent
+    # Pull the release cache when (a) there's no local copy, OR (b) the release asset is NEWER than
+    # the local pkl. Streamlit Cloud containers are long-lived, so without (b) a container that once
+    # downloaded the pkl would serve that boot-day snapshot for days — the actual "data not updating"
+    # bug. `_release_asset_updated_epoch()` is cached 30 min, so this check is cheap on every rerun.
+    remote = _release_asset_updated_epoch()
+    local  = os.path.getmtime(CACHE_PKL) if os.path.exists(CACHE_PKL) else 0
+    if remote is not None and remote > local + 30:
+        _try_download_cache_from_release()          # release is newer → refresh the local copy
+    elif not os.path.exists(CACHE_PKL):
+        _try_download_cache_from_release()          # no local copy → pull it
     if os.path.exists(CACHE_PKL):
         try:
             with open(CACHE_PKL, "rb") as f:
@@ -202,7 +247,7 @@ def _fetch_one_raw(ticker, years=YEARS):
     return df.reset_index(drop=True) if not df.empty else None
 
 
-@st.cache_data(show_spinner="Fetching price history…")
+@st.cache_data(show_spinner="Fetching price history…", ttl=3600)   # refresh intraday, not once-per-boot
 def fetch_one(ticker, years=YEARS):
     return _fetch_one_raw(ticker, years)
 
@@ -243,7 +288,7 @@ def _hist_df(symbol):
     return d.dropna(subset=["Date"]).reset_index(drop=True)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=86400)      # fundamentals are quarterly; refresh daily, not once-per-boot
 def fetch_fund(ticker):
     return vs.fetch_fundamentals(ticker)
 
@@ -251,30 +296,42 @@ def fetch_fund(ticker):
 @st.cache_data(show_spinner="Loading superstar investors…", ttl=21600)
 def fetch_superstar_summary():
     """Read the pre-computed FII/DII Indian investor summary (list + portfolio metrics +
-    Trendlyne links) written by the fii_dii notebook. Returns an empty df if unavailable."""
-    try:
-        from gspread_dataframe import get_as_dataframe
-        ws = _gspread_client().open_by_key(FII_SHEET_KEY).worksheet(FII_SUMMARY_TAB)
-        df = get_as_dataframe(ws, evaluate_formulas=True).dropna(how="all")
-        df = df.dropna(axis=1, how="all")
-        if "name" in df.columns:
-            df = df[df["name"].astype(str).str.strip() != ""].reset_index(drop=True)
-        return df
-    except Exception:
-        return pd.DataFrame()
+    Trendlyne links) written by the fii_dii notebook. Returns an empty df if unavailable.
+    Retries first so a transient gspread blip isn't memoized as 'empty' for the 6h TTL."""
+    from gspread_dataframe import get_as_dataframe
+    import time as _time
+    for _a in range(3):
+        try:
+            ws = _gspread_client().open_by_key(FII_SHEET_KEY).worksheet(FII_SUMMARY_TAB)
+            df = get_as_dataframe(ws, evaluate_formulas=True).dropna(how="all")
+            df = df.dropna(axis=1, how="all")
+            if "name" in df.columns:
+                df = df[df["name"].astype(str).str.strip() != ""].reset_index(drop=True)
+            return df
+        except Exception:
+            if _a < 2:
+                _time.sleep(1.5 * (_a + 1))
+    return pd.DataFrame()
 
 
-def _read_fii_tab(tab):
-    """Read any tab from the FII/DII sheet → clean df (empty df if missing/unreadable)."""
-    try:
-        from gspread_dataframe import get_as_dataframe
-        ws = _gspread_client().open_by_key(FII_SHEET_KEY).worksheet(tab)
-        df = get_as_dataframe(ws, evaluate_formulas=True).dropna(how="all").dropna(axis=1, how="all")
-        if "name" in df.columns:
-            df = df[df["name"].astype(str).str.strip() != ""].reset_index(drop=True)
-        return df
-    except Exception:
-        return pd.DataFrame()
+def _read_fii_tab(tab, _tries=3):
+    """Read any tab from the FII/DII sheet → clean df (empty df if missing/unreadable).
+    Retries a few times first: a transient gspread blip (quota 429 / token refresh / network) must
+    NOT get memoized as an empty table for the caller's 6h cache TTL (which reads as 'data stopped
+    updating' even though the sheet is fine)."""
+    from gspread_dataframe import get_as_dataframe
+    import time as _time
+    for _a in range(_tries):
+        try:
+            ws = _gspread_client().open_by_key(FII_SHEET_KEY).worksheet(tab)
+            df = get_as_dataframe(ws, evaluate_formulas=True).dropna(how="all").dropna(axis=1, how="all")
+            if "name" in df.columns:
+                df = df[df["name"].astype(str).str.strip() != ""].reset_index(drop=True)
+            return df
+        except Exception:
+            if _a < _tries - 1:
+                _time.sleep(1.5 * (_a + 1))
+    return pd.DataFrame()
 
 
 @st.cache_data(show_spinner="Loading alert history…", ttl=21600)
@@ -2649,8 +2706,9 @@ if _mode == "⭐ Superstars":
         st.markdown("---")
         if st.button("🔄  Refresh superstar data", use_container_width=True,
                      help="Re-read the investor summary + re-scrape holdings."):
-            for _f in (fetch_superstar_summary, fetch_superstar_holdings, fetch_superstar_bulkblock,
-                       fetch_superstar_sast, fetch_superstar_insider, fetch_market_bulkblock):
+            for _f in (fetch_superstar_summary, _fetch_holdings_tab, fetch_superstar_moves,
+                       fetch_superstar_bulkblock, fetch_superstar_sast, fetch_superstar_insider,
+                       fetch_market_bulkblock):
                 try: _f.clear()
                 except Exception: pass
             st.rerun()
@@ -3167,6 +3225,7 @@ if _mode == "🔔 Alerts":
             fetch_master_stock.clear(); fetch_superstar_moves.clear()
             fetch_superstar_sast.clear(); fetch_superstar_bulkblock.clear()
             fetch_superstar_insider.clear(); build_quality_moves.clear()
+            fetch_quarter_updates.clear()      # the 'quarter advances' feed shown on this page
             st.rerun()
         st.caption("Alerts read the FII/DII sheet (run the notebook to refresh the underlying data).")
 

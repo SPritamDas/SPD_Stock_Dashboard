@@ -1,12 +1,22 @@
 name: nightly-refresh
 
-# Runs the full data refresh once a day:
-#   1. execute the (scrubbed) FII/DII notebook headless  -> refreshes the superstar Google Sheets
-#   2. build the V-universe price/fundamentals cache       -> vivek_output/dashboard_cache.pkl
-#   3. publish that cache as a single, overwritten GitHub Release asset (no git-history bloat)
+# FULLY AUTOMATED daily refresh — runs entirely in the cloud (no local machine needed):
+#   1. execute the FII/DII notebook headless -> refreshes ALL the superstar Google-Sheet tabs
+#   2. build the V-universe price/fundamentals cache -> vivek_output/dashboard_cache.pkl
+#   3. publish that cache as a single, overwritten GitHub Release asset (the deployed app pulls it)
+#
+# SCRAPING FROM THE CLOUD: NSE (and Trendlyne to a lesser degree) block GitHub's datacenter IPs.
+#   • WITHOUT a proxy: yfinance data (prices/cache/index) + investorgain IPO refresh fine; the
+#     NSE deal feeds (bulk/block · SAST · insider · market-wide) may not refresh — they're block-safe
+#     (last-good preserved, no crash).
+#   • WITH a proxy: add a repo secret  SCRAPE_PROXY = http://user:pass@host:port  (any residential/
+#     rotating proxy) and ALL scraping routes through it → NSE/Trendlyne work from the cloud, laptop
+#     off. Data volume is tiny (~tens of MB/day). No code change needed to switch it on.
 on:
   schedule:
-    - cron: "30 14 * * *"   # 20:00 IST (8 PM, after NSE posts its EOD deals) = 14:30 UTC
+    - cron: "0 15 * * *"     # 20:30 IST (8:30 PM, after NSE posts its EOD deals) = 15:00 UTC.
+                             # NOTE: GitHub cron can start 5–30+ min late; the run takes ~45–75 min,
+                             # so it should finish before a 10 PM IST check. Move earlier for more buffer.
   workflow_dispatch: {}      # lets you trigger it manually from the Actions tab
 
 permissions:
@@ -14,12 +24,14 @@ permissions:
 
 concurrency:                 # never let two nightly runs overlap
   group: nightly-refresh
-  cancel-in-progress: false
+  cancel-in-progress: true   # a fresh nightly SUPERSEDES a lingering/stuck one (the build is idempotent).
+                             # (Was false → queued runs got auto-cancelled, silently skipping a night: runs #35/#36.)
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 180       # the Trendlyne scrape is slow + self-throttled
+    timeout-minutes: 90        # notebook step is capped at 45 (and now exits fast on a block); refresh.py
+                               # is the rest. 90 leaves headroom without letting a run bleed into the next night.
     steps:
       - uses: actions/checkout@v4
 
@@ -34,15 +46,30 @@ jobs:
           pip install -r requirements-ci.txt
 
       - name: Refresh FII/DII superstar sheets (run notebook headless)
-        continue-on-error: true   # Trendlyne/NSE block datacenter IPs, so from CI this usually no-ops
-                                  # (feeds are block-safe → last good data preserved). The real refresh is
-                                  # local `run_daily.sh` on a residential IP; this step is best-effort.
+        continue-on-error: true   # keep going to the cache build + publish even if a scrape source is
+                                  # blocked/errors — the feeds are block-safe (last-good preserved), and
+                                  # --allow-errors means the notebook won't abort on one bad cell.
         timeout-minutes: 45       # cap a blocked/hung scrape so refresh.py + the cache publish still run
         env:
           GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          # OPTIONAL residential-proxy switch (see header). Unset = scrape direct from the datacenter IP.
+          SCRAPE_PROXY: ${{ secrets.SCRAPE_PROXY }}
         run: |
+          if [ -n "${SCRAPE_PROXY}" ]; then
+            export HTTPS_PROXY="$SCRAPE_PROXY" HTTP_PROXY="$SCRAPE_PROXY"
+            # keep Google Sheets auth + GitHub off the proxy (no need; saves proxy bandwidth)
+            export NO_PROXY="googleapis.com,google.com,oauth2.googleapis.com,github.com,githubusercontent.com"
+            echo "::notice::Scraping via residential proxy (SCRAPE_PROXY is set)."
+          else
+            echo "::notice::No SCRAPE_PROXY secret — scraping direct from the datacenter IP; NSE/Trendlyne deal feeds may not refresh (block-safe)."
+          fi
           jupyter nbconvert --to notebook --execute fii_dii_investment_pattern.ipynb \
-            --output /tmp/executed.ipynb --ExecutePreprocessor.timeout=-1
+            --output /tmp/executed.ipynb \
+            --ExecutePreprocessor.timeout=1200 \
+            --ExecutePreprocessor.interrupt_on_timeout=True \
+            --allow-errors
+          # concise per-cell summary into the Actions log (what wrote / ALERTed / errored)
+          python nb_summary.py /tmp/executed.ipynb
 
       - name: Build the V-universe cache (prices + fundamentals)
         env:
