@@ -76,6 +76,29 @@ jobs:
           # concise per-cell summary into the Actions log (what wrote / ALERTed / errored)
           python nb_summary.py /tmp/executed.ipynb
 
+      - name: Seed the previous cache from the Release asset (enables carry-forward)
+        # CRITICAL for refresh.py's incremental fundamentals. Each run gets a FRESH checkout and
+        # vivek_output/ is git-ignored, so without this step there is no previous cache in the
+        # workspace: refresh.py would see "no prev" and do a FULL 660-ticker fundamentals refresh
+        # EVERY night (~3300 requests) — straight back into the Yahoo rate-limit cliff that left 39%
+        # of the V-universe blank. Downloading last night's asset first means carry-forward works in
+        # CI exactly as it does locally, so coverage only ever improves instead of being rebuilt from
+        # zero and regressing the published asset on a throttled night.
+        # continue-on-error: a missing/unreachable asset (very first run) must not fail the build —
+        # refresh.py just cold-builds, which is the old behaviour.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p vivek_output
+          if gh release download data-latest --pattern dashboard_cache.pkl \
+               --dir vivek_output --clobber 2>/dev/null; then
+            ls -lh vivek_output/dashboard_cache.pkl
+            echo "::notice::Seeded previous cache — fundamentals will carry forward."
+          else
+            echo "::notice::No previous 'data-latest' asset (or download failed) — cold build."
+          fi
+
       - name: Build the V-universe cache (prices + fundamentals)
         # Reads the V-universe LIVE from the `stock_classifications` tab first, so sheet edits apply
         # to this run. Fundamentals are incremental (carried forward, full refresh weekly) to stay
