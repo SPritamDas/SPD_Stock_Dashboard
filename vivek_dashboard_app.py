@@ -29,6 +29,13 @@ from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+# ⚠️ FORWARD-COMPAT WATCH: Streamlit 1.58 prints "st.components.v1.html will be removed after
+# 2026-06-01; replace with st.iframe". It is NOT a drop-in swap here — st.iframe takes a URL/path
+# `src`, and st.html renders inline markup but does not execute <script>. The three call sites
+# (floating calculator, floating notes, publish_context) all inject inline JS that talks to
+# window.parent, which is exactly what neither replacement supports. Keeping components.v1.html
+# until a real migration path exists; if a Streamlit upgrade finally removes it, those three
+# widgets go dark (the rest of the app is unaffected) — pin streamlit and revisit then.
 
 import vivek_strategies as vs
 import vivek_dashboard_core as core
@@ -76,7 +83,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 st.set_page_config(page_title="SPritamDas Strategy Dashboard", layout="wide",
                    initial_sidebar_state="expanded")
 
-# ---- access control: Google sign-in + allow-list + session timeout ----
+# ---- access control: shared-password gate + idle/absolute session timeout (see auth.py) ----
 import auth
 auth.require_login()
 
@@ -161,6 +168,27 @@ def _try_download_cache_from_release():
         return
 
 
+@st.cache_resource(show_spinner="Loading price cache…", max_entries=1)
+def _read_cache_pkl(path, mtime, size):
+    """Unpickle the cache ONCE PER CONTAINER, not once per session. The payload is ~90-125 MB of
+    DataFrames; without this every browser session (and every rerun) built its own copy, so a few
+    concurrent viewers could exhaust Streamlit Cloud's memory. cache_resource shares one object
+    across all sessions.
+
+    (mtime, size) are part of the cache KEY — a freshly-downloaded pkl therefore loads automatically.
+    Do NOT rename these with a leading underscore: Streamlit EXCLUDES underscore-prefixed arguments
+    from the key, which would pin the very first payload forever. max_entries=1 keeps only the newest
+    copy resident instead of leaking a 100 MB object per rebuild.
+
+    The returned object is SHARED, so it must be treated as read-only (verified: the app only ever
+    reads cache["data"]/["fund"]/["groups"]; build_full_cache() builds a new dict and clears this)."""
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception:
+        return None
+
+
 def load_cache():
     # Pull the release cache when (a) there's no local copy, OR (b) the release asset is NEWER than
     # the local pkl. Streamlit Cloud containers are long-lived, so without (b) a container that once
@@ -173,43 +201,59 @@ def load_cache():
     elif not os.path.exists(CACHE_PKL):
         _try_download_cache_from_release()          # no local copy → pull it
     if os.path.exists(CACHE_PKL):
-        try:
-            with open(CACHE_PKL, "rb") as f:
-                return pickle.load(f)
-        except Exception:
-            return None
+        _st = os.stat(CACHE_PKL)
+        return _read_cache_pkl(CACHE_PKL, _st.st_mtime, _st.st_size)
     return None
 
 
-@st.cache_data(show_spinner="Reading group lists from Google Sheet…")
+# Sheet-error text and other non-symbols must never reach yfinance or the ticker picker. Shared with
+# refresh.py via vivek_strategies, so the app and the nightly build agree on what counts as a ticker
+# and on which renamed symbols to redirect (EIH -> EIHOTEL, TATAMOTORS -> TMPV).
+_clean_symbol = vs.clean_symbol
+
+
+@st.cache_data(show_spinner="Reading group lists from Google Sheet…", ttl=900)
 def read_groups_from_sheet():
-    from gspread_dataframe import get_as_dataframe
-    ws = _gspread_client().open_by_key(SHEET_KEY).worksheet(WORKSHEET_NAME)
-    df = get_as_dataframe(ws, evaluate_formulas=True).dropna(how="all")
-    groups = {}
-    for col in GROUP_COLUMNS:
-        if col in df.columns:
-            groups[col] = sorted({str(x).strip().upper() for x in df[col].dropna()
-                                  if str(x).strip() and str(x).strip().lower() != "nan"})
-    return groups
+    """Live V-universe from the `stock_classifications` tab (15-min TTL). Returns {} on any failure
+    so the caller can fall back to the cache's copy."""
+    try:
+        from gspread_dataframe import get_as_dataframe
+        ws = _gspread_client().open_by_key(SHEET_KEY).worksheet(WORKSHEET_NAME)
+        df = get_as_dataframe(ws, evaluate_formulas=True).dropna(how="all")
+        groups = {}
+        for col in GROUP_COLUMNS:
+            if col in df.columns:
+                groups[col] = sorted({s for s in (_clean_symbol(x) for x in df[col].dropna()) if s})
+        return {g: v for g, v in groups.items() if v}
+    except Exception:
+        return {}
 
 
 def get_groups(cache):
+    """Prefer the LIVE sheet so edits to the stock lists show up without waiting for a rebuild;
+    fall back to the cache's copy if Sheets is unreachable. (Names added in the sheet but not yet
+    in the nightly cache still render — they just fetch on demand.)"""
+    live = read_groups_from_sheet()
+    if live:
+        return live
     if cache and cache.get("groups"):
-        return cache["groups"]
-    return read_groups_from_sheet()
+        return {g: [s for s in (_clean_symbol(x) for x in v) if s]
+                for g, v in cache["groups"].items()}
+    return {}
 
 
 def _fetch_one_raw(ticker, years=YEARS):
     """Plain fetch — safe to call from worker threads (no Streamlit cache). Tries NSE (.NS)
-    first, then falls back to BSE (.BO) for names that are BSE-only or transiently missing on NSE."""
+    first, then falls back to BSE (.BO) for names that are BSE-only or transiently missing on NSE.
+    Renamed symbols are redirected via vs.SYMBOL_ALIASES (the result stays keyed by `ticker`)."""
     import yfinance as yf
+    symbol = vs.resolve_symbol(ticker)
     today = datetime.now().date()
     end = today + timedelta(days=1)              # yfinance `end` is EXCLUSIVE -> +1 to include today's candle
     start = today - timedelta(days=years * 365)
     tk = df = None
     for suffix in (".NS", ".BO"):                # NSE first, then BSE (BSE-only / NSE-missing names)
-        _tk = yf.Ticker(f"{ticker}{suffix}")
+        _tk = yf.Ticker(f"{symbol}{suffix}")
         try:
             _df = _tk.history(start=start, end=end, interval="1d")
         except Exception:
@@ -256,8 +300,8 @@ def fetch_one(ticker, years=YEARS):
 def _cur_price(ticker):
     """Latest close for a bulk/block ticker (tries NSE .NS then BSE .BO). Returns None for
     BSE-numeric scrip codes and any ticker yfinance can't resolve — used for '% since buy'."""
-    t = str(ticker).strip().upper()
-    if not t or t.isdigit():                     # numeric = BSE scrip code, not yfinance-able
+    t = _clean_symbol(ticker)                    # rejects blanks, BSE scrip codes, sheet-error text
+    if not t:
         return None
     df = _fetch_one_raw(t, years=1)
     if df is None or df.empty or "Close" not in df.columns:
@@ -272,8 +316,8 @@ def _cur_price(ticker):
 def _hist_df(symbol):
     """~2y daily (Date, Close) for an NSE/BSE symbol — read BOTH the latest close and the close on a
     report date from one fetch. None for BSE-numeric / unresolvable tickers."""
-    t = str(symbol).strip().upper()
-    if not t or t.isdigit():
+    t = _clean_symbol(symbol)                    # rejects blanks, BSE scrip codes, sheet-error text
+    if not t:
         return None
     df = _fetch_one_raw(t, years=2)
     if df is None or getattr(df, "empty", True) or "Date" not in getattr(df, "columns", []) or "Close" not in df.columns:
@@ -1089,9 +1133,11 @@ def build_full_cache(groups, do_prices=True, do_fund=True, prev=None):
         prog.empty()
         return out
 
+    _KEEP = ("Date", "Open", "High", "Low", "Close", "Volume")   # match refresh.py: drop unread cols
     if do_prices:                                  # merge: keep a prior series for any ticker that fails to refetch
         got = _parallel(_fetch_one_raw, "prices")
-        data.update({t: df for t, df in got.items() if df is not None})
+        data.update({t: df[[c for c in _KEEP if c in df.columns]]
+                     for t, df in got.items() if df is not None})
         ts_prices = now
     if do_fund:                                    # merge: keep prior fundamentals for any that come back empty
         got = _parallel(vs.fetch_fundamentals, "fundamentals")
@@ -1100,8 +1146,13 @@ def build_full_cache(groups, do_prices=True, do_fund=True, prev=None):
 
     payload = {"groups": groups, "data": data, "fund": fund,
                "built": now, "built_prices": ts_prices, "built_fund": ts_fund}
-    with open(CACHE_PKL, "wb") as f:
+    # atomic write (match refresh.py): a crash mid-pickle must not leave a truncated pkl that the
+    # next boot fails to unpickle.
+    _tmp = CACHE_PKL + ".tmp"
+    with open(_tmp, "wb") as f:
         pickle.dump(payload, f)
+    os.replace(_tmp, CACHE_PKL)
+    _read_cache_pkl.clear()                        # the shared cache_resource copy is now stale
     return payload
 
 
@@ -2027,6 +2078,12 @@ div[data-baseweb="textarea"]:focus-within{ border-color:var(--spd-gold-line) !im
 
 cache = load_cache()
 groups = get_groups(cache)
+# Cache-busting token for every @st.cache_data consumer that reads the module-level `cache`/`groups`
+# instead of taking them as arguments. It must change when EITHER the pickle is rebuilt OR the sheet's
+# stock lists are edited — groups now come from the live sheet, so the pickle timestamp alone is not
+# enough. Defined here (before the page blocks, which st.stop()) so every block can use it.
+data_token = ((cache.get("built", "none") if cache else "none") + "|"
+              + hashlib.md5(json.dumps(groups, sort_keys=True).encode()).hexdigest()[:8])
 
 # ---- deep-link from a 📒 note: ?open=TICKER → jump into that stock's analysis ----
 _goto = st.query_params.get("open")
@@ -2104,7 +2161,7 @@ if _mode == "💡 Allocate ₹":
 
     # ---- strategy layer: best live setup per ticker (V-universe backtest engine) ----
     try:
-        _invt = build_investable_table((cache.get("built", "none") if cache else "none"))
+        _invt = build_investable_table(data_token)
     except Exception:
         _invt = pd.DataFrame()
     _setup = pd.DataFrame()
@@ -2113,7 +2170,11 @@ if _mode == "💡 Allocate ₹":
         _iv["_ep"] = pd.to_numeric(_iv.get("Exp Profit %"), errors="coerce").fillna(0)
         _iv["_sr"] = pd.to_numeric(_iv.get("Success %"), errors="coerce").fillna(0)
         _iv["_ev"] = _iv["_ep"] * _iv["_sr"] / 100.0
-        _iv = _iv.sort_values("_ev", ascending=False).groupby("Ticker", as_index=False).first()
+        # drop_duplicates, NOT groupby().first(): .first() takes the first NON-NULL value of each
+        # column INDEPENDENTLY, so it can splice one strategy's label onto another row's entry/target
+        # (e.g. a ticker whose top-EV setup is 52w-low but whose V20 row carries the Entry). We want
+        # ONE whole row — the genuine best-EV setup for that ticker.
+        _iv = _iv.sort_values("_ev", ascending=False, kind="mergesort").drop_duplicates("Ticker")
         _setup = _iv.rename(columns={"Ticker": "ticker", "Status": "setup", "Strategy": "strategy",
                                      "Entry": "entry", "Target": "target", "_ep": "exp_profit",
                                      "_sr": "success", "_ev": "setup_ev"})
@@ -2179,7 +2240,6 @@ if _mode == "💡 Allocate ₹":
         base = base[base.get("setup", pd.Series("", index=base.index)).astype(str).str.len() > 0]
     # profile pre-filter
     if _profile == "Conservative":
-        _tv = pd.to_numeric(base.get("total_value_cr"), errors="coerce").fillna(0)
         base = base[(base["n_holders"] >= 3) | (base["vbonus"] >= 10) | (base["setup_bonus"] > 0)]
     if base.empty:
         st.info("No candidates matched this profile / filter."); st.stop()
@@ -2423,10 +2483,11 @@ if _mode == "💎 Investable now":
         st.warning("No price cache loaded yet — the nightly data build hasn't run, or it's still "
                    "downloading. Try again in a moment, or build it from the **📊 Stocks** sidebar.")
         st.stop()
-    _inv = build_investable_table((cache.get("built", "none") if cache else "none"))
+    _inv = build_investable_table(data_token)
     if _inv.empty:
         st.info("Nothing is **READY** or **REVIEW** across the cached universe right now "
-                "(strategies: **V20 · Lifetime High · 52-Week Low**). Check back after the next 5 PM refresh.")
+                "(strategies: **V20 · Lifetime High · 52-Week Low**). Check back after the next "
+                "nightly refresh (~8:30 PM IST).")
         st.stop()
     _ready_n = int((_inv["Status"] == "🟢 READY").sum())
     _rev_n = int((_inv["Status"] == "🟡 REVIEW").sum())
@@ -2469,7 +2530,7 @@ if _mode == "💎 Investable now":
                    args=(_ipick, "💎 Investable now"))
     st.caption("Every **V-universe** company (V40 · V40 Next · V200) is checked against "
                "**V20 · Lifetime High · 52-Week Low** — the strategies these names are built for. Read entirely "
-               "from the **nightly cache** (rebuilt 5 PM) — no live fetching, so it loads in seconds. "
+               "from the **nightly cache** (rebuilt ~8:30 PM IST) — no live fetching, so it loads in seconds. "
                "**Exp./Median days** now include still-open positions' elapsed time, so long-running setups aren't hidden.")
     st.stop()
 
@@ -2615,7 +2676,7 @@ if _mode == "🌐 Indices":
         st.divider()
         with st.container(border=True):
             st.markdown(f"### 📋 {_idx['name']} — constituent value screen ({len(_syms)} companies)")
-            _ctab = constituents_table(_csv, (cache.get("built", "none") if cache else "live"))
+            _ctab = constituents_table(_csv, data_token)
             if _ctab.empty:
                 st.caption(f"Couldn't fetch data for the {len(_syms)} constituents (network / Yahoo). "
                            "Try **🔄 Refresh index data**.")
@@ -2666,7 +2727,7 @@ if _mode == "🌐 Indices":
                         _esig = f"{os.path.getmtime(vs.__file__):.0f}.{os.path.getmtime(core.__file__):.0f}"
                     except Exception:
                         _esig = "0"
-                    _itok = (cache.get("built", "none") if cache else "none") + "|" + _esig
+                    _itok = data_token + "|" + _esig
                     with st.spinner(f"Checking each strategy's current signal for {_pick}…"):
                         _iprof = multi_strategy_status(_pick, _itok)
                     _l2k = {v: k for k, v in core.STRATEGY_LABELS.items()}
@@ -3956,7 +4017,9 @@ try:
     _eng_sig = f"{os.path.getmtime(vs.__file__):.0f}.{os.path.getmtime(core.__file__):.0f}"
 except Exception:
     _eng_sig = "0"
-token = (cache.get("built", "none") if cache else "none") + "|" + _eng_sig
+# data_token already covers pickle-rebuild + live-sheet edits; add the engine mtimes so a strategy
+# code change also busts the scan (otherwise a hot-reload keeps stale green/red dots).
+token = data_token + "|" + _eng_sig
 scan_df = scan_strategy(skey, token) if cache else pd.DataFrame()
 status_map, exp_map = {}, {}
 if not scan_df.empty:

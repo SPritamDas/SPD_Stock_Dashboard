@@ -43,6 +43,48 @@ GROWTH_MULTIPLE = 3.0
 GROWTH_YEARS = 3.0
 TRADING_DAYS = 252
 
+# ---------------------------------------------------------------------------
+# SYMBOL HYGIENE  (single source of truth — imported by refresh.py AND the app)
+# ---------------------------------------------------------------------------
+# A Google-Sheets formula error is read back by gspread as its literal ERROR TEXT when
+# evaluate_formulas=True, e.g. "#N/A (DID NOT FIND VALUE 'X' IN XLOOKUP EVALUATION.)". Without a
+# guard, that string gets handed to yfinance as a ticker on every run and also shows up in the
+# app's ticker picker.
+SHEET_ERROR_MARKERS = ("#N/A", "#REF!", "#VALUE!", "#NAME?", "#DIV/0!", "#NULL!", "#NUM!", "#ERROR!")
+# Characters real NSE/BSE symbols use: RELIANCE, BAJAJ-AUTO, M&M, MRF.
+_SYMBOL_OK = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789&-.")
+
+# Yahoo renamed / re-listed these. The successor carries the SAME full price history (verified:
+# TMPV back to 1991, EIHOTEL to 1996), so aliasing loses nothing. Fetches are redirected through
+# the alias while everything is still CACHED AND DISPLAYED under the sheet's symbol.
+SYMBOL_ALIASES = {
+    "EIH": "EIHOTEL",        # EIH Ltd — its NSE symbol is EIHOTEL; plain "EIH" 404s on Yahoo
+    "TATAMOTORS": "TMPV",    # post-demerger, Yahoo carries the continuous Tata Motors series as TMPV
+}
+
+
+def clean_symbol(raw):
+    """Sheet cell -> canonical NSE symbol, or None if it isn't a symbol at all.
+    Rejects blanks, 'nan', spreadsheet error text, bare BSE scrip codes (yfinance can't fetch a
+    number on .NS/.BO) and anything containing characters no real symbol has."""
+    t = str(raw).strip().upper()
+    if not t or t == "NAN":
+        return None
+    if any(m in t for m in SHEET_ERROR_MARKERS):
+        return None
+    if t.endswith(".0"):                    # gspread may render a numeric cell as "532540.0"
+        t = t[:-2]
+    if not t or t.isdigit():                # bare scrip code / numeric id
+        return None
+    if not set(t) <= _SYMBOL_OK:            # spaces, quotes, parentheses… -> not a symbol
+        return None
+    return t
+
+
+def resolve_symbol(ticker):
+    """The symbol to actually FETCH for a given sheet symbol (applies SYMBOL_ALIASES)."""
+    return SYMBOL_ALIASES.get(str(ticker).strip().upper(), ticker)
+
 
 def pace_window_days(entry, target):
     """Trading days allowed to reach `target` from `entry` while staying on the
@@ -888,6 +930,11 @@ def strategy_52w_low(df, threshold_pct=5, gap_days=5, **kw):
     lth = float(df["lifetime_high"].iloc[-1])
     summary = {"Ready_to_Invest": ready, "current_price": round(cur, 2),
                "52W_Low": round(low52, 2), "Dist_From_52W_Low_%": round(dist, 2),
+               # buy AT the current price (the signal IS "price is at/near the 52w low").
+               # Without this the KPI row, "Investable now" and the Allocate briefing all showed a
+               # blank Entry for every 52w-low setup, and kpi_block's target/exp-profit fallbacks
+               # (which require an entry) were dead for this strategy.
+               "Entry_Price": round(cur, 2) if ready == "YES" else np.nan,
                "Target_Price": round(lth, 2) if ready == "YES" else np.nan,
                "exp_profit_pct": round((lth - cur) / cur * 100, 2) if ready == "YES" else np.nan}
     return {**summary, **stats}, details
@@ -942,7 +989,11 @@ def strategy_3x3y(df, fall_pct=67, still_below_pct=50, fundamentals=None, **kw):
         "cond4_track_record": track_record, "cond6_quarter_improved": qtr_improved,
         "MANUAL_cond2_reason_of_fall": "REVIEW", "MANUAL_cond3_reason_gone": "REVIEW",
         "MANUAL_cond5_future_prospect": "REVIEW",
+        # buy at the current price; target = +100% (the taught rule). Entry_Price was missing, so the
+        # KPI row / Investable-now showed a Target with no Entry and no expected profit for this strategy.
+        "Entry_Price": round(cur, 2) if ready == "REVIEW" else np.nan,
         "Target_Price": round(cur * 2, 2) if ready == "REVIEW" else np.nan,
+        "exp_profit_pct": 100.0 if ready == "REVIEW" else np.nan,
     }
     return {**summary, **stats}, details
 
@@ -954,6 +1005,7 @@ def fetch_fundamentals(ticker):
     """Return dict with raw per-quarter & per-year revenue/net-profit history (for the
     trend graph) + TTM-highest flags / quarter-improvement (for the signal gate), or
     {} on failure. yfinance gives ~4-5 quarters and ~4 years for free."""
+    ticker = resolve_symbol(ticker)     # renamed names (EIH -> EIHOTEL, TATAMOTORS -> TMPV)
     try:
         import yfinance as yf
         tk = q = af = None

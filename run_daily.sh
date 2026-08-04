@@ -2,16 +2,17 @@
 # ============================================================================
 # SPD Stock Dashboard — one-command daily refresh
 # ----------------------------------------------------------------------------
-# WHEN: run once in the evening on a TRADING DAY (Mon–Fri), ~7:00 PM IST — after
+# WHEN: run once in the evening on a TRADING DAY (Mon–Fri), ~9:00 PM IST — after
 #       NSE has posted the day's bulk/block + SAST files. (The GitHub Actions
-#       yml runs 5 PM IST; 7 PM catches late-posted deals more reliably.)
+#       yml runs 8:30 PM IST; a later local run catches late-posted deals.)
 #
 # WHAT it does, in order:
 #   1) fii_dii_investment_pattern.ipynb  -> refreshes ALL Google-Sheet tabs
 #      (superstar summary · holdings · bulk/block · SAST · insider · market-wide)
-#   2) refresh.py                         -> builds the V-universe price /
-#      fundamentals / strategy-setup cache (dashboard_cache.pkl)
-#   3) gh release upload                  -> publishes that cache so the DEPLOYED
+#   2) refresh.py                         -> reads the V-universe LIVE from the
+#      `stock_classifications` tab (so sheet edits apply immediately), then builds
+#      the price / fundamentals cache (dashboard_cache.pkl)
+#   3) publish                            -> uploads that cache so the DEPLOYED
 #      dashboard on Streamlit Cloud picks it up (sheet writes in step 1 are
 #      already live and need no publish)
 #
@@ -69,6 +70,27 @@ log "[2/3] Building V-universe cache (refresh.py)…"
 log ""
 log "[3/3] Publishing cache to the GitHub release…"
 CACHE="vivek_output/dashboard_cache.pkl"
+
+# Pick up the upload token without needing it exported by hand every session. Order:
+#   1. $GH_UPLOAD_TOKEN already in the environment
+#   2. .streamlit/secrets.toml  ->  [github] upload_token   (add it there once; it is git-ignored)
+# NOTE: [github] token in that file is Contents:READ-ONLY (enough for the app to DOWNLOAD the asset)
+# and cannot upload — so we deliberately read a SEPARATE `upload_token` key, not `token`.
+if [ -z "${GH_UPLOAD_TOKEN:-}" ] && [ -f .streamlit/secrets.toml ]; then
+  GH_UPLOAD_TOKEN="$("$PY" - <<'EOF' 2>/dev/null || true
+try:
+    import tomllib
+    with open(".streamlit/secrets.toml", "rb") as f:
+        print((tomllib.load(f).get("github") or {}).get("upload_token", ""))
+except Exception:
+    print("")
+EOF
+)"
+  GH_UPLOAD_TOKEN="$(printf '%s' "$GH_UPLOAD_TOKEN" | tr -d '[:space:]')"
+  [ -n "$GH_UPLOAD_TOKEN" ] && export GH_UPLOAD_TOKEN \
+    && log "    (upload token loaded from .streamlit/secrets.toml [github] upload_token)"
+fi
+
 if [ ! -f "$CACHE" ]; then
   log "    (skipped — $CACHE not built; step [2/3] must have failed. Deployed app keeps its last cache.)"
 elif command -v gh >/dev/null 2>&1; then
@@ -83,10 +105,14 @@ elif [ -n "${GH_UPLOAD_TOKEN:-}" ]; then
   # Read-only — enough for the app to DOWNLOAD, not to upload).
   "$PY" publish_cache.py 2>&1 | tee -a "$LOG"
 else
-  log "    (skipped — no 'gh' CLI and no \$GH_UPLOAD_TOKEN set, so the freshest cache is NOT reaching"
-  log "     the deployed app. To publish from this machine without gh:"
-  log "        export GH_UPLOAD_TOKEN=<fine-grained PAT · Contents:Read-write · this repo only>"
-  log "     then re-run. Or run the dashboard locally — it reads the local cache directly.)"
+  log "    🚨 NOT PUBLISHED — no 'gh' CLI and no upload token, so the DEPLOYED app will keep serving"
+  log "       whatever the last GitHub Actions run uploaded. Your freshest cache is only on this Mac."
+  log "       Fix it ONCE, either way:"
+  log "         (a) add to .streamlit/secrets.toml   →   [github]"
+  log "                                                  upload_token = \"github_pat_…\""
+  log "             (a fine-grained PAT · Contents: Read-WRITE · this repo only)"
+  log "         (b) or: brew install gh && gh auth login"
+  log "       (Running the dashboard locally still works — it reads this local cache directly.)"
 fi
 
 log ""

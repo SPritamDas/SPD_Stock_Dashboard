@@ -30,8 +30,13 @@ concurrency:                 # never let two nightly runs overlap
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 90        # notebook step is capped at 45 (and now exits fast on a block); refresh.py
-                               # is the rest. 90 leaves headroom without letting a run bleed into the next night.
+    # 90 was NOT enough headroom. A typical run is ~75 min total, but refresh.py's own wall-clock
+    # backstops (which exist so a hung yfinance socket can't wedge the build) permit far longer:
+    # prices ~55 min + retries ~11 + a FULL fundamentals refresh ~88 + its retries ~19. On a slow
+    # night the job hit the 90-min ceiling and was killed BEFORE the publish step — so the cache was
+    # built and then thrown away. 210 covers even the worst case; a run still cannot bleed into the
+    # next night (24 h apart), and `concurrency.cancel-in-progress` supersedes a lingering run anyway.
+    timeout-minutes: 210
     steps:
       - uses: actions/checkout@v4
 
@@ -72,6 +77,10 @@ jobs:
           python nb_summary.py /tmp/executed.ipynb
 
       - name: Build the V-universe cache (prices + fundamentals)
+        # Reads the V-universe LIVE from the `stock_classifications` tab first, so sheet edits apply
+        # to this run. Fundamentals are incremental (carried forward, full refresh weekly) to stay
+        # under Yahoo's rate limit — see the FUND_* constants in refresh.py.
+        timeout-minutes: 150
         env:
           GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
         run: python refresh.py
